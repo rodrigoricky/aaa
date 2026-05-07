@@ -1,0 +1,155 @@
+/* ===== DESIGN TOKEN SYSTEM ===== */
+:root {
+  /* Primary */
+  --c-black:        #000000;
+  --c-sidebar:      #111111;
+
+  /* Backgrounds */
+  --color-bg-base:    #ffffff;
+  --color-bg-surface: #f5f5f5;
+  --color-bg-card:    #ffffff;
+
+  /* Borders */
+  --color-border:       #eaeaea;
+  --color-border-focus: #000000;
+
+  /* Text */
+  --color-text-primary:   #222222;
+  --color-text-secondary: #666666;
+  --color-text-muted:     #999999;
+  --color-text-inverse:   #ffffff;
+
+  /* Status — muted tones */
+  --c-success:    #2e7d32;
+  --c-success-bg: #edf7ee;
+  --c-warning:    #ed6c02;
+  --c-warning-bg: #fff4e5;
+  --c-error:      #d32f2f;
+  --c-error-bg:   #fdecea;
+  --c-info:       #0277bd;
+  --c-info-bg:    #e1f3fd;
+
+  /* Aliases (backward compat) */
+  --color-bg:              var(--color-bg-base);
+  --color-bg-secondary:    var(--color-bg-surface);
+  --color-black:           var(--c-black);
+  --color-black-hover:     #1a1a1a;
+  --color-danger:          var(--c-error);
+  --color-danger-hover:    #b71c1c;
+  --color-danger-bg:       var(--c-error-bg);
+  --color-success:         var(--c-success);
+  --color-success-bg:      var(--c-success-bg);
+  --color-warning:         var(--c-warning);
+  --color-warning-bg:      var(--c-warning-bg);
+  --color-info:            var(--c-info);
+  --color-info-bg:         var(--c-info-bg);
+
+  /* Spacing & shape */
+  --radius:    6px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  --shadow-md: 0 2px 8px 0 rgb(0 0 0 / 0.08);
+  --shadow-lg: 0 4px 16px 0 rgb(0 0 0 / 0.10);
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-size-xs:  11px;
+  --font-size-sm:  12px;
+  --font-size-base: 14px;
+  --font-size-md:  15px;
+  --font-size-lg:  18px;
+  --font-size-xl:  22px;
+
+  /* Layout */
+  --sidebar-width:           240px;
+  --sidebar-width-collapsed:  56px;
+  --header-height:            56px;
+  --button-height:            36px;
+  --table-row-height:         44px;
+  --card-padding:             20px;
+  --page-padding:             24px;
+}
+
+/* ===== RESET ===== */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  height: 100%;
+  isolation: isolate;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
+input, select, textarea {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+}
+
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* ===== FOCUS VISIBLE ===== */
+:focus-visible {
+  outline: 2px solid var(--c-black);
+  outline-offset: 2px;
+}
+
+/* ===== ACCESSIBILITY ===== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b0b0b0; }
+
+/* ===== GLOBAL KEYFRAMES ===== */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+

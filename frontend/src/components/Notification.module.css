@@ -1,0 +1,91 @@
+.notification {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-radius: 8px;
+  background: white;
+  border: 1px solid;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  font-size: 14px;
+  font-weight: 500;
+  animation: notificationSlideIn 0.3s ease-out;
+}
+
+@keyframes notificationSlideIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -60%);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+
+.notification.success {
+  border-color: #2e7d32;
+  color: #2e7d32;
+}
+
+.notification.success .icon {
+  color: #2e7d32;
+}
+
+.notification.error {
+  border-color: #d32f2f;
+  color: #d32f2f;
+}
+
+.notification.error .icon {
+  color: #d32f2f;
+}
+
+.notification.info {
+  border-color: #1565c0;
+  color: #1565c0;
+}
+
+.notification.info .icon {
+  color: #1565c0;
+}
+
+.icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message {
+  flex: 1;
+  max-width: 400px;
+}
+
+.close {
+  background: none;
+  border: none;
+  color: currentColor;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.close:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.close:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}

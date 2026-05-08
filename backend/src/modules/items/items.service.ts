@@ -1,7 +1,12 @@
 import { getSqlPool, sql } from '../../shared/database/sql-server.js';
 import { methodNotAllowed, notFound } from '../../shared/errors/http-errors.js';
 import type { PaginatedResult } from '../../shared/types/index.js';
-import { cleanString, toIsoString, toNumber } from '../../shared/utils/value.js';
+import {
+  cleanString,
+  parseRequiredQuantity,
+  toIsoString,
+  toNumber,
+} from '../../shared/utils/value.js';
 
 export const DEFAULT_LOW_STOCK_THRESHOLD = 10;
 
@@ -95,9 +100,9 @@ export async function getItems(query: {
   const rows = result.recordset as Array<Record<string, unknown> & { totalRows?: number }>;
   const total = Number(rows[0]?.totalRows ?? 0);
   const data = rows.map((row) => {
-    const quantity = toNumber(row.end_qty);
-    const lowStockThreshold = resolveLowStockThreshold(row.reorder_level);
     const itemcode = cleanString(row.itemcode);
+    const quantity = parseRequiredQuantity(row.end_qty, itemcode);
+    const lowStockThreshold = resolveLowStockThreshold(row.reorder_level);
     const itemname = cleanString(row.itemname);
     const price = toNumber(row.unitprice);
 
@@ -151,21 +156,22 @@ export async function getItemById(id: string) {
   }
 
   const row = result.recordset[0];
-  const quantity = toNumber(row.end_qty);
+  const itemcode = cleanString(row.itemcode);
+  const quantity = parseRequiredQuantity(row.end_qty, itemcode);
   const lowStockThreshold = resolveLowStockThreshold(row.reorder_level);
   const price = toNumber(row.unitprice);
 
   return {
-    id: cleanString(row.itemcode),
+    id: itemcode,
     name: cleanString(row.itemname),
-    sku: cleanString(row.itemcode),
+    sku: itemcode,
     category: cleanString(row.category),
     quantity,
     price,
     status: getStockStatus(quantity, lowStockThreshold),
     department: cleanString(row.department),
     unitprice: price,
-    itemcode: cleanString(row.itemcode),
+    itemcode,
     createdAt: toIsoString(row.date_created),
     updatedAt: toIsoString(row.date_modified),
   };
@@ -199,7 +205,7 @@ export async function getItemSnapshots(itemcodes: string[]) {
       {
         itemcode: cleanString(row.itemcode),
         itemname: cleanString(row.itemname),
-        quantity: toNumber(row.end_qty),
+        quantity: parseRequiredQuantity(row.end_qty, cleanString(row.itemcode)),
       },
     ])
   );

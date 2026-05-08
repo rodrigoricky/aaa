@@ -11,6 +11,8 @@ export interface QuantityAdjustmentLine {
   oldQty: number;
   adjustQty: number;
   newQty: number;
+  postedOldQty: number | null;
+  postedNewQty: number | null;
   entryMode: 'DELTA' | 'SET' | null;
   requestedQty: number;
   itemRemark: string | null;

@@ -111,6 +111,14 @@ export async function buildApp() {
 
   fastify.setErrorHandler((error, request, reply) => {
     if (isAppError(error)) {
+      const itemDetails =
+        error.details &&
+        typeof error.details === 'object' &&
+        !Array.isArray(error.details) &&
+        'items' in error.details
+          ? { items: (error.details as { items: unknown }).items }
+          : {};
+
       return reply.status(error.statusCode).send({
         success: false,
         data: null,
@@ -120,6 +128,7 @@ export async function buildApp() {
           details: error.details,
         },
         message: error.message,
+        ...itemDetails,
       });
     }
 

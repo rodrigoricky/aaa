@@ -7,7 +7,7 @@ import {
 } from './numbering.controller.js';
 
 export async function numberingRoutes(fastify: FastifyInstance): Promise<void> {
-  const adminSettings = [authenticate, requireRoles('Admin', 'Supervisor')];
+  const adminSettings = [authenticate, requireRoles('Admin')];
 
   fastify.get('/qa', { preHandler: adminSettings }, handleGetQaNumberingSettings);
   fastify.put('/qa', { preHandler: adminSettings }, handleUpdateQaNumberingSettings);

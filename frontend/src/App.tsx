@@ -29,19 +29,6 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function RoleRoute({
-  roles,
-  children,
-}: {
-  roles: Array<'Admin' | 'Supervisor'>;
-  children: React.ReactNode;
-}) {
-  const { isAuthenticated, hasRole } = useAuth();
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
-  if (!roles.some((role) => hasRole(role))) return <Navigate to="/dashboard" replace />;
-  return <>{children}</>;
-}
-
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
   if (isAuthenticated) {
@@ -135,9 +122,9 @@ export default function App() {
             <Route
               path="settings/qa-numbering"
               element={
-                <RoleRoute roles={['Admin', 'Supervisor']}>
+                <AdminRoute>
                   <QaNumberingSettings />
-                </RoleRoute>
+                </AdminRoute>
               }
             />
           </Route>

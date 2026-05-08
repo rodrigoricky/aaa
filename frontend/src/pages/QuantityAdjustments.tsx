@@ -40,6 +40,18 @@ interface ValidationErrors {
   byRow: Record<string, { adjustQty?: string; itemComment?: string }>;
 }
 
+interface StaleStockItem {
+  itemcode: string;
+  savedQty: number;
+  liveQty: number;
+  difference: number;
+}
+
+interface StaleStockConflict {
+  message: string;
+  items: StaleStockItem[];
+}
+
 const MAX_QA_LINES = 8;
 const MAX_QA_LINES_MESSAGE = 'Maximum of 8 items per Quantity Adjustment.';
 
@@ -152,25 +164,21 @@ function hasValidationErrors(errors: ValidationErrors) {
   return Boolean(errors.lines || Object.keys(errors.byRow).length > 0);
 }
 
-function getStaleStockMessage(details: unknown) {
-  const staleItems = (details as {
-    staleItems?: Array<{
-      itemcode: string;
-      savedOldQty: number;
-      currentQty: number | null;
-    }>;
-  })?.staleItems;
+function getStaleStockConflict(error: unknown): StaleStockConflict | null {
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  const details = getApiErrorDetails<{ items?: StaleStockItem[] }>(error);
 
-  if (!staleItems?.length) {
+  if (status !== 409 || !details?.items?.length) {
     return null;
   }
 
-  const preview = staleItems
-    .slice(0, 3)
-    .map((item) => `${item.itemcode} (${item.savedOldQty} -> ${item.currentQty ?? 'n/a'})`)
-    .join(', ');
-
-  return `Stock changed. Review item(s): ${preview}`;
+  return {
+    message: getApiErrorMessage(
+      error,
+      'Stock changed after this adjustment was saved. Please reload and review before posting.'
+    ),
+    items: details.items,
+  };
 }
 
 export default function QuantityAdjustments() {
@@ -193,6 +201,7 @@ export default function QuantityAdjustments() {
   const [printLoading, setPrintLoading] = useState(false);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
   const [postConfirmOpen, setPostConfirmOpen] = useState(false);
+  const [staleStockConflict, setStaleStockConflict] = useState<StaleStockConflict | null>(null);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [cancellationReason, setCancellationReason] = useState('');
   const [cancellationReasonError, setCancellationReasonError] = useState('');
@@ -268,6 +277,7 @@ export default function QuantityAdjustments() {
       setIsDirty(false);
       setItemSearch('');
       setItemResults([]);
+      setStaleStockConflict(null);
     } catch {
       setNotification({
         message: 'Failed to load adjustment',
@@ -350,6 +360,7 @@ export default function QuantityAdjustments() {
     setItemSearch('');
     setItemResults([]);
     setCancelConfirmOpen(false);
+    setStaleStockConflict(null);
     setCancellationReason('');
     setCancellationReasonError('');
     setSearchParams({}, { replace: true });
@@ -461,6 +472,7 @@ export default function QuantityAdjustments() {
       setDraftLines(toDraftLines(result));
       setValidationErrors({ byRow: {} });
       setIsDirty(false);
+      setStaleStockConflict(null);
       setSearchParams({ open: result.id }, { replace: true });
       await loadMeta().catch(() => {});
       setNotification({
@@ -485,16 +497,33 @@ export default function QuantityAdjustments() {
       setCurrentDocument(result);
       setDraftLines(toDraftLines(result));
       setPostConfirmOpen(false);
+      setStaleStockConflict(null);
       setNotification({
         message: result.status === 'CANCELLED' ? 'Cancellation posted.' : 'Adjustment posted.',
         type: 'success',
       });
     } catch (error) {
-      const staleStockMessage = getStaleStockMessage(getApiErrorDetails(error));
-      setFormError(staleStockMessage ?? getApiErrorMessage(error, 'Failed to post adjustment'));
+      const staleStock = getStaleStockConflict(error);
+      if (staleStock) {
+        setPostConfirmOpen(false);
+        setStaleStockConflict(staleStock);
+        setFormError(staleStock.message);
+      } else {
+        setFormError(getApiErrorMessage(error, 'Failed to post adjustment'));
+      }
     } finally {
       setFormLoading(false);
     }
+  };
+
+  const reloadStaleAdjustment = async () => {
+    if (!currentDocument?.id) {
+      setStaleStockConflict(null);
+      return;
+    }
+
+    await loadDocument(currentDocument.id);
+    setStaleStockConflict(null);
   };
 
   const openCancellationModal = () => {
@@ -976,6 +1005,47 @@ export default function QuantityAdjustments() {
             </>
           )}
         </p>
+      </Modal>
+
+      <Modal
+        open={Boolean(staleStockConflict)}
+        onClose={() => setStaleStockConflict(null)}
+        title="Stock Changed"
+        size="md"
+        footer={
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <Button variant="secondary" onClick={() => setStaleStockConflict(null)}>
+              Close
+            </Button>
+            <Button onClick={reloadStaleAdjustment} loading={loadingDocumentId === currentDocument?.id}>
+              Reload Adjustment
+            </Button>
+          </div>
+        }
+      >
+        <div className={styles.staleStockPanel}>
+          <p className={styles.confirmText}>{staleStockConflict?.message}</p>
+          <table className={styles.staleStockTable}>
+            <thead>
+              <tr>
+                <th>Item Code</th>
+                <th>Saved Qty</th>
+                <th>Live Qty</th>
+                <th>Difference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {staleStockConflict?.items.map((item) => (
+                <tr key={item.itemcode}>
+                  <td className={styles.mono}>{item.itemcode}</td>
+                  <td>{item.savedQty.toFixed(2)}</td>
+                  <td>{item.liveQty.toFixed(2)}</td>
+                  <td>{item.difference.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </Modal>
 
       <Modal

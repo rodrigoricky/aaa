@@ -286,6 +286,40 @@
   line-height: 1.6;
 }
 
+.staleStockPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.staleStockTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.staleStockTable th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.staleStockTable td {
+  padding: 8px 10px;
+  color: var(--color-text-primary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.staleStockTable tr:last-child td {
+  border-bottom: none;
+}
+
 .cancelReasonField {
   display: flex;
   flex-direction: column;

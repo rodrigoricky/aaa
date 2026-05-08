@@ -243,6 +243,8 @@ BEGIN
     old_qty DECIMAL(18, 2) NOT NULL,
     adjust_qty DECIMAL(18, 2) NOT NULL,
     new_qty DECIMAL(18, 2) NOT NULL,
+    posted_old_qty DECIMAL(18, 2) NULL,
+    posted_new_qty DECIMAL(18, 2) NULL,
     item_remark NVARCHAR(500) NULL,
     updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
     CONSTRAINT FK_qa_detail_header FOREIGN KEY (qa_id) REFERENCES [utility].[qa_header](qa_id) ON DELETE CASCADE
@@ -380,6 +382,24 @@ IF NOT EXISTS (
 BEGIN
   ALTER TABLE [utility].[qa_detail] ADD entry_mode NVARCHAR(10) NULL;
   ALTER TABLE [utility].[qa_detail] ADD requested_qty DECIMAL(18, 2) NULL;
+END
+GO
+
+IF NOT EXISTS (
+  SELECT 1 FROM sys.columns
+  WHERE object_id = OBJECT_ID(N'[utility].[qa_detail]') AND name = N'posted_old_qty'
+)
+BEGIN
+  ALTER TABLE [utility].[qa_detail] ADD posted_old_qty DECIMAL(18, 2) NULL;
+END
+GO
+
+IF NOT EXISTS (
+  SELECT 1 FROM sys.columns
+  WHERE object_id = OBJECT_ID(N'[utility].[qa_detail]') AND name = N'posted_new_qty'
+)
+BEGIN
+  ALTER TABLE [utility].[qa_detail] ADD posted_new_qty DECIMAL(18, 2) NULL;
 END
 GO
 

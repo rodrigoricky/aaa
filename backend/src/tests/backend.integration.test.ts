@@ -15,7 +15,9 @@ if (!hasRequiredDbEnv) {
 } else {
   const ADMIN = { username: 'test_admin_backend', password: 'AdminPass1' };
   const PLAIN_ADMIN = { username: 'test_plain_admin_backend', password: 'AdminPass1' };
+  const SUPERVISOR = { username: 'test_supervisor_backend', password: 'SupervisorPass1' };
   const OFFICER = { username: 'test_officer_backend', password: 'OfficerPass1' };
+  const SECURITY_LEVEL_2 = { username: 'test_security_l2_backend', password: 'SecurityPass1' };
   const SHORT_PASSWORD_USER = { username: 'test_short_pw_backend', password: 'abc' };
   const TEST_ITEMCODE = '0000001';
 
@@ -43,7 +45,9 @@ if (!hasRequiredDbEnv) {
       .request()
       .input('adminUsername', ADMIN.username)
       .input('plainAdminUsername', PLAIN_ADMIN.username)
+      .input('supervisorUsername', SUPERVISOR.username)
       .input('officerUsername', OFFICER.username)
+      .input('securityLevel2Username', SECURITY_LEVEL_2.username)
       .input('shortPasswordUsername', SHORT_PASSWORD_USER.username)
       .query(`
         SELECT qa_id AS qaId, qa_no AS qaNo
@@ -51,7 +55,9 @@ if (!hasRequiredDbEnv) {
         WHERE created_by_username IN (
           @adminUsername,
           @plainAdminUsername,
+          @supervisorUsername,
           @officerUsername,
+          @securityLevel2Username,
           @shortPasswordUsername
         )
       `);
@@ -96,20 +102,26 @@ if (!hasRequiredDbEnv) {
       .request()
       .input('adminUsername', ADMIN.username)
       .input('plainAdminUsername', PLAIN_ADMIN.username)
+      .input('supervisorUsername', SUPERVISOR.username)
       .input('officerUsername', OFFICER.username)
+      .input('securityLevel2Username', SECURITY_LEVEL_2.username)
       .input('shortPasswordUsername', SHORT_PASSWORD_USER.username)
       .query(`
         DELETE FROM [${utilitySchema}].[audit_log]
         WHERE actor_username IN (
               @adminUsername,
               @plainAdminUsername,
+              @supervisorUsername,
               @officerUsername,
+              @securityLevel2Username,
               @shortPasswordUsername
             )
            OR entity_id IN (
               @adminUsername,
               @plainAdminUsername,
+              @supervisorUsername,
               @officerUsername,
+              @securityLevel2Username,
               @shortPasswordUsername
             );
 
@@ -117,7 +129,9 @@ if (!hasRequiredDbEnv) {
         WHERE username IN (
           @adminUsername,
           @plainAdminUsername,
+          @supervisorUsername,
           @officerUsername,
+          @securityLevel2Username,
           @shortPasswordUsername
         );
       `);
@@ -126,7 +140,9 @@ if (!hasRequiredDbEnv) {
   async function createTestUsers() {
     const pool = await getSqlPool();
     const adminHash = await hashPassword(ADMIN.password);
+    const supervisorHash = await hashPassword(SUPERVISOR.password);
     const officerHash = await hashPassword(OFFICER.password);
+    const securityLevel2Hash = await hashPassword(SECURITY_LEVEL_2.password);
 
     await pool
       .request()
@@ -135,8 +151,12 @@ if (!hasRequiredDbEnv) {
       .input('adminLegacyUserId', securityLevel2LegacyUser)
       .input('plainAdminUsername', PLAIN_ADMIN.username)
       .input('plainAdminHash', adminHash)
+      .input('supervisorUsername', SUPERVISOR.username)
+      .input('supervisorHash', supervisorHash)
       .input('officerUsername', OFFICER.username)
       .input('officerHash', officerHash)
+      .input('securityLevel2Username', SECURITY_LEVEL_2.username)
+      .input('securityLevel2Hash', securityLevel2Hash)
       .query(`
         INSERT INTO [${utilitySchema}].[app_users] (username, password_hash, role_id, legacy_user_id, is_active)
         VALUES (@adminUsername, @adminHash, 1, @adminLegacyUserId, 1);
@@ -145,7 +165,13 @@ if (!hasRequiredDbEnv) {
         VALUES (@plainAdminUsername, @plainAdminHash, 1, 1);
 
         INSERT INTO [${utilitySchema}].[app_users] (username, password_hash, role_id, is_active)
+        VALUES (@supervisorUsername, @supervisorHash, 2, 1);
+
+        INSERT INTO [${utilitySchema}].[app_users] (username, password_hash, role_id, is_active)
         VALUES (@officerUsername, @officerHash, 3, 1);
+
+        INSERT INTO [${utilitySchema}].[app_users] (username, password_hash, role_id, is_active)
+        VALUES (@securityLevel2Username, @securityLevel2Hash, 5, 1);
       `);
   }
 
@@ -188,6 +214,168 @@ if (!hasRequiredDbEnv) {
     assert.ok(cookieHeader);
 
     return Array.isArray(cookieHeader) ? cookieHeader[0].split(';')[0] : cookieHeader.split(';')[0];
+  }
+
+  async function setTestItemQuantity(quantity: number) {
+    const pool = await getSqlPool();
+    await pool
+      .request()
+      .input('itemcode', TEST_ITEMCODE)
+      .input('quantity', sql.Decimal(18, 2), quantity)
+      .query(`
+        UPDATE items
+        SET
+          end_qty = @quantity,
+          END_QTY_TEMP = @quantity,
+          ASSEMBLY_QTY = @quantity
+        WHERE itemcode = @itemcode
+      `);
+  }
+
+  async function setTestItemLiveFields(input: {
+    endQty: number | null;
+    endQtyTemp?: number;
+    assemblyQty?: number;
+  }) {
+    const pool = await getSqlPool();
+    await pool
+      .request()
+      .input('itemcode', TEST_ITEMCODE)
+      .input('endQty', sql.Decimal(18, 2), input.endQty)
+      .input('endQtyTemp', sql.Decimal(18, 2), input.endQtyTemp ?? null)
+      .input('assemblyQty', sql.Decimal(18, 2), input.assemblyQty ?? null)
+      .query(`
+        UPDATE items
+        SET
+          end_qty = @endQty,
+          END_QTY_TEMP = COALESCE(@endQtyTemp, END_QTY_TEMP),
+          ASSEMBLY_QTY = COALESCE(@assemblyQty, ASSEMBLY_QTY)
+        WHERE itemcode = @itemcode
+      `);
+  }
+
+  async function saveAdjustment(cookie: string, requestedQty: number, itemcode = TEST_ITEMCODE) {
+    return app.inject({
+      method: 'POST',
+      url: '/api/quantity-adjustments',
+      headers: {
+        cookie,
+      },
+      payload: {
+        refType: 'DM',
+        lines: [
+          {
+            itemcode,
+            entryMode: 'DELTA',
+            requestedQty,
+            itemRemark: 'Quantity safety test',
+          },
+        ],
+      },
+    });
+  }
+
+  async function getLatestAuditEvent(eventType: string, qaId: string | number) {
+    const pool = await getSqlPool();
+    const result = await pool
+      .request()
+      .input('eventType', sql.NVarChar, eventType)
+      .input('entityId', sql.NVarChar, String(qaId))
+      .query(`
+        SELECT TOP 1
+          event_type AS eventType,
+          details
+        FROM [${utilitySchema}].[audit_log]
+        WHERE event_type = @eventType
+          AND entity_id = @entityId
+        ORDER BY created_at DESC
+      `);
+
+    return result.recordset[0] ?? null;
+  }
+
+  async function insertSavedAdjustmentForMissingItem() {
+    const pool = await getSqlPool();
+    const unique = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const missingItemcode = `QA_MISSING_${unique}`.slice(0, 50);
+    const qaNo = `QA-MISSING-${unique}`.slice(0, 50);
+    const refNo = `MISS-${unique}`.slice(0, 50);
+
+    const result = await pool
+      .request()
+      .input('qaNo', sql.NVarChar, qaNo)
+      .input('refNo', sql.NVarChar, refNo)
+      .input('username', sql.NVarChar, ADMIN.username)
+      .input('itemcode', sql.NVarChar, missingItemcode)
+      .query(`
+        DECLARE @createdBy BIGINT;
+        DECLARE @createdQa TABLE (qaId BIGINT);
+
+        SELECT TOP 1 @createdBy = user_id
+        FROM [${utilitySchema}].[app_users]
+        WHERE username = @username;
+
+        INSERT INTO [${utilitySchema}].[qa_header] (
+          qa_no,
+          trans_date,
+          ref_type,
+          ref_no,
+          ref_series_no,
+          status,
+          created_by,
+          created_by_username,
+          updated_by,
+          updated_by_username
+        )
+        OUTPUT inserted.qa_id INTO @createdQa
+        VALUES (
+          @qaNo,
+          SYSUTCDATETIME(),
+          N'DM',
+          @refNo,
+          999999,
+          N'SAVED',
+          @createdBy,
+          @username,
+          @createdBy,
+          @username
+        );
+
+        DECLARE @qaId BIGINT = (SELECT TOP 1 qaId FROM @createdQa);
+
+        INSERT INTO [${utilitySchema}].[qa_detail] (
+          qa_id,
+          line_no,
+          itemcode,
+          itemname,
+          old_qty,
+          adjust_qty,
+          new_qty,
+          entry_mode,
+          requested_qty,
+          item_remark
+        )
+        VALUES (
+          @qaId,
+          1,
+          @itemcode,
+          N'Missing test item',
+          100,
+          -1,
+          99,
+          N'DELTA',
+          -1,
+          N'Missing item post test'
+        );
+
+        SELECT @qaId AS qaId;
+      `);
+
+    return {
+      id: String(result.recordset[0].qaId),
+      qaNo,
+      itemcode: missingItemcode,
+    };
   }
 
   test.before(async () => {
@@ -608,22 +796,169 @@ if (!hasRequiredDbEnv) {
     assert.equal(response.statusCode, 400);
   });
 
-  test('posts using the current database quantity and synchronizes mirrored quantity fields', async () => {
-    const cookie = await loginAndGetCookie(ADMIN);
-    const pool = await getSqlPool();
+  test('restricts QA numbering settings API to Admin only', async () => {
+    const adminCookie = await loginAndGetCookie(ADMIN);
+    const supervisorCookie = await loginAndGetCookie(SUPERVISOR);
+    const encoderCookie = await loginAndGetCookie(OFFICER);
+    const securityLevel2Cookie = await loginAndGetCookie(SECURITY_LEVEL_2);
 
-    await app.inject({
-      method: 'PUT',
+    const adminGetResponse = await app.inject({
+      method: 'GET',
       url: '/api/numbering/qa',
       headers: {
-        cookie,
-      },
-      payload: {
-        format: 'QA-000X',
-        nextValue: 6001,
+        cookie: adminCookie,
       },
     });
 
+    assert.equal(adminGetResponse.statusCode, 200);
+
+    const adminPutResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/numbering/qa',
+      headers: {
+        cookie: adminCookie,
+      },
+      payload: {
+        format: 'QA-000X',
+        nextValue: 300,
+      },
+    });
+
+    assert.equal(adminPutResponse.statusCode, 200);
+
+    for (const cookie of [supervisorCookie, encoderCookie, securityLevel2Cookie]) {
+      const getResponse = await app.inject({
+        method: 'GET',
+        url: '/api/numbering/qa',
+        headers: {
+          cookie,
+        },
+      });
+      assert.equal(getResponse.statusCode, 403);
+
+      const putResponse = await app.inject({
+        method: 'PUT',
+        url: '/api/numbering/qa',
+        headers: {
+          cookie,
+        },
+        payload: {
+          format: 'QA-000X',
+          nextValue: 301,
+        },
+      });
+      assert.equal(putResponse.statusCode, 403);
+    }
+  });
+
+  test('rejects saving when live item quantity is NULL', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+
+    await setTestItemLiveFields({ endQty: null });
+    const saveResponse = await saveAdjustment(cookie, 1);
+
+    assert.equal(saveResponse.statusCode, 422);
+    assert.match(saveResponse.json().message, /no valid current quantity/);
+
+    await setTestItemQuantity(100);
+  });
+
+  test('rejects posting when live item quantity is NULL and writes an invalid-stock audit event', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+
+    await setTestItemQuantity(100);
+    const saveResponse = await saveAdjustment(cookie, -4);
+    assert.equal(saveResponse.statusCode, 201);
+    const savedPayload = saveResponse.json();
+
+    await setTestItemLiveFields({ endQty: null });
+
+    const postResponse = await app.inject({
+      method: 'POST',
+      url: `/api/quantity-adjustments/${savedPayload.data.id}/post`,
+      headers: {
+        cookie,
+      },
+    });
+
+    assert.equal(postResponse.statusCode, 422);
+    assert.match(postResponse.json().message, /no valid current quantity/);
+
+    const audit = await getLatestAuditEvent(
+      'QA_POST_BLOCKED_INVALID_STOCK',
+      savedPayload.data.id
+    );
+    assert.ok(audit);
+
+    await setTestItemQuantity(100);
+  });
+
+  test('rejects saving an adjustment for a missing item', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const missingItemcode = `QA_MISSING_SAVE_${Date.now()}`.slice(0, 50);
+
+    const saveResponse = await saveAdjustment(cookie, 1, missingItemcode);
+
+    assert.equal(saveResponse.statusCode, 422);
+    assert.match(saveResponse.json().message, /no valid current quantity/);
+  });
+
+  test('rejects posting an adjustment whose saved item is missing', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const saved = await insertSavedAdjustmentForMissingItem();
+
+    const postResponse = await app.inject({
+      method: 'POST',
+      url: `/api/quantity-adjustments/${saved.id}/post`,
+      headers: {
+        cookie,
+      },
+    });
+
+    assert.equal(postResponse.statusCode, 422);
+    assert.match(postResponse.json().message, /no valid current quantity/);
+
+    const audit = await getLatestAuditEvent('QA_POST_BLOCKED_INVALID_STOCK', saved.id);
+    assert.ok(audit);
+  });
+
+  test('allows real zero quantity when saving and posting', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const pool = await getSqlPool();
+
+    await setTestItemQuantity(0);
+    const saveResponse = await saveAdjustment(cookie, 5);
+    assert.equal(saveResponse.statusCode, 201);
+    assert.equal(saveResponse.json().data.lines[0].oldQty, 0);
+
+    const postResponse = await app.inject({
+      method: 'POST',
+      url: `/api/quantity-adjustments/${saveResponse.json().data.id}/post`,
+      headers: {
+        cookie,
+      },
+    });
+
+    assert.equal(postResponse.statusCode, 200);
+    assert.equal(postResponse.json().data.lines[0].oldQty, 0);
+    assert.equal(postResponse.json().data.lines[0].postedOldQty, 0);
+    assert.equal(postResponse.json().data.lines[0].postedNewQty, 5);
+
+    const itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
+      SELECT TOP 1 end_qty AS endQty
+      FROM items
+      WHERE itemcode = @itemcode
+    `);
+
+    assert.equal(Number(itemResult.recordset[0].endQty), 5);
+    await setTestItemQuantity(100);
+  });
+
+  test('blocks posting when stock changed after save without partial writes', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const pool = await getSqlPool();
+
+    await setTestItemQuantity(100);
     const saveResponse = await app.inject({
       method: 'POST',
       url: '/api/quantity-adjustments',
@@ -636,8 +971,8 @@ if (!hasRequiredDbEnv) {
           {
             itemcode: TEST_ITEMCODE,
             entryMode: 'DELTA',
-            requestedQty: 2,
-            itemRemark: 'Live quantity posting test',
+            requestedQty: -4,
+            itemRemark: 'Stale stock posting test',
           },
         ],
       },
@@ -645,23 +980,93 @@ if (!hasRequiredDbEnv) {
 
     assert.equal(saveResponse.statusCode, 201);
     const savedPayload = saveResponse.json();
-    assert.equal(savedPayload.data.qaNo, 'QA-6001');
+    assert.equal(savedPayload.data.lines[0].oldQty, 100);
+    assert.equal(savedPayload.data.lines[0].newQty, 96);
 
-    const liveQuantity = originalItemState.quantity + 5;
-    await pool
+    await setTestItemLiveFields({ endQty: 0, endQtyTemp: 777, assemblyQty: 888 });
+
+    const postResponse = await app.inject({
+      method: 'POST',
+      url: `/api/quantity-adjustments/${savedPayload.data.id}/post`,
+      headers: {
+        cookie,
+      },
+    });
+
+    assert.equal(postResponse.statusCode, 409);
+    const conflictPayload = postResponse.json();
+    assert.equal(
+      conflictPayload.message,
+      'Stock changed after this adjustment was saved. Please reload and review before posting.'
+    );
+    assert.deepEqual(conflictPayload.error.details.items, [
+      {
+        itemcode: TEST_ITEMCODE,
+        savedQty: 100,
+        liveQty: 0,
+        difference: -100,
+      },
+    ]);
+    assert.deepEqual(conflictPayload.items, conflictPayload.error.details.items);
+
+    const verification = await pool
       .request()
       .input('itemcode', TEST_ITEMCODE)
-      .input('liveQty', sql.Decimal(18, 2), liveQuantity)
-      .input('tempQty', sql.Decimal(18, 2), 999)
-      .input('assemblyQty', sql.Decimal(18, 2), 888)
+      .input('qaId', sql.BigInt, Number(savedPayload.data.id))
+      .input('batchNo', sql.NVarChar, String(savedPayload.data.qaNo).slice(-10))
       .query(`
-        UPDATE items
-        SET
-          end_qty = @liveQty,
-          END_QTY_TEMP = @tempQty,
-          ASSEMBLY_QTY = @assemblyQty
-        WHERE itemcode = @itemcode
-      `);
+      SELECT TOP 1
+        end_qty AS endQty,
+        END_QTY_TEMP AS endQtyTemp,
+        ASSEMBLY_QTY AS assemblyQty
+      FROM items
+      WHERE itemcode = @itemcode;
+
+      SELECT TOP 1
+        h.status,
+        d.old_qty AS oldQty,
+        d.new_qty AS newQty,
+        d.posted_old_qty AS postedOldQty,
+        d.posted_new_qty AS postedNewQty
+      FROM [${utilitySchema}].[qa_header] h
+      INNER JOIN [${utilitySchema}].[qa_detail] d
+        ON d.qa_id = h.qa_id
+      WHERE h.qa_id = @qaId;
+
+      SELECT COUNT(*) AS total
+      FROM inventory_adjustment
+      WHERE machine_id = 'UTILITY'
+        AND BATCH_NO = @batchNo;
+    `);
+    const recordsets = verification.recordsets as Array<Array<Record<string, unknown>>>;
+
+    assert.equal(Number(recordsets[0][0].endQty), 0);
+    assert.equal(Number(recordsets[0][0].endQtyTemp), 777);
+    assert.equal(Number(recordsets[0][0].assemblyQty), 888);
+    assert.equal(recordsets[1][0].status, 'SAVED');
+    assert.equal(Number(recordsets[1][0].oldQty), 100);
+    assert.equal(Number(recordsets[1][0].newQty), 96);
+    assert.equal(recordsets[1][0].postedOldQty, null);
+    assert.equal(recordsets[1][0].postedNewQty, null);
+    assert.equal(Number(recordsets[2][0].total), 0);
+
+    const audit = await getLatestAuditEvent(
+      'QA_POST_BLOCKED_STALE_STOCK',
+      savedPayload.data.id
+    );
+    assert.ok(audit);
+
+    await setTestItemQuantity(100);
+  });
+
+  test('posts when saved stock still matches live stock and preserves saved old quantity', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const pool = await getSqlPool();
+
+    await setTestItemQuantity(100);
+    const saveResponse = await saveAdjustment(cookie, -4);
+    assert.equal(saveResponse.statusCode, 201);
+    const savedPayload = saveResponse.json();
 
     const postResponse = await app.inject({
       method: 'POST',
@@ -673,9 +1078,10 @@ if (!hasRequiredDbEnv) {
 
     assert.equal(postResponse.statusCode, 200);
     const postedPayload = postResponse.json();
-    assert.equal(postedPayload.data.qaNo, 'QA-6001');
-    assert.equal(postedPayload.data.lines[0].oldQty, liveQuantity);
-    assert.equal(postedPayload.data.lines[0].newQty, liveQuantity + 2);
+    assert.equal(postedPayload.data.lines[0].oldQty, 100);
+    assert.equal(postedPayload.data.lines[0].newQty, 96);
+    assert.equal(postedPayload.data.lines[0].postedOldQty, 100);
+    assert.equal(postedPayload.data.lines[0].postedNewQty, 96);
 
     const itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
       SELECT TOP 1
@@ -686,9 +1092,11 @@ if (!hasRequiredDbEnv) {
       WHERE itemcode = @itemcode
     `);
 
-    assert.equal(Number(itemResult.recordset[0].endQty), liveQuantity + 2);
-    assert.equal(Number(itemResult.recordset[0].endQtyTemp), liveQuantity + 2);
-    assert.equal(Number(itemResult.recordset[0].assemblyQty), liveQuantity + 2);
+    assert.equal(Number(itemResult.recordset[0].endQty), 96);
+    assert.equal(Number(itemResult.recordset[0].endQtyTemp), 96);
+    assert.equal(Number(itemResult.recordset[0].assemblyQty), 96);
+
+    await setTestItemQuantity(100);
   });
 
   test('reset:qa removes a specific posted quantity adjustment and restores inventory state', async () => {

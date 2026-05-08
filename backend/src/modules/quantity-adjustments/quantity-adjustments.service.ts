@@ -14,7 +14,12 @@ import type {
   PaginatedResult,
   ReferenceType,
 } from '../../shared/types/index.js';
-import { cleanString, toIsoString, toNumber } from '../../shared/utils/value.js';
+import {
+  cleanString,
+  parseRequiredQuantity,
+  toIsoString,
+  toNumber,
+} from '../../shared/utils/value.js';
 import { recordAuditEvent } from '../../utils/audit.js';
 import {
   allocateNextNumber,
@@ -65,6 +70,8 @@ interface AdjustmentDetailRow {
   oldQty: number;
   adjustQty: number;
   newQty: number;
+  postedOldQty: number | null;
+  postedNewQty: number | null;
   entryMode: string | null;
   requestedQty: number | null;
   itemRemark: string | null;
@@ -79,9 +86,91 @@ interface ItemSnapshotRow {
 
 const MAX_QA_LINES = 8;
 const MAX_QA_LINES_MESSAGE = 'Maximum of 8 items per Quantity Adjustment.';
+const STALE_STOCK_MESSAGE =
+  'Stock changed after this adjustment was saved. Please reload and review before posting.';
+
+interface StaleStockConflictItem {
+  itemcode: string;
+  savedQty: number;
+  liveQty: number;
+  difference: number;
+}
+
+interface BlockedPostAudit {
+  eventType: 'QA_POST_BLOCKED_INVALID_STOCK' | 'QA_POST_BLOCKED_STALE_STOCK';
+  qaId: number;
+  qaNo: string;
+  actor: AuthenticatedUser;
+  details: {
+    qaNo: string;
+    itemcode: string | null;
+    savedQty: number | null;
+    liveQty: number | null;
+    user: string;
+    timestamp: string;
+    reason: string;
+    items: Array<{
+      itemcode: string;
+      savedQty: number | null;
+      liveQty: number | null;
+      difference?: number;
+      reason?: string;
+    }>;
+  };
+}
 
 function isDraftQaNumber(value: unknown) {
   return cleanString(value).startsWith('DRAFT-');
+}
+
+function invalidStockMessage(itemcode: string) {
+  return `Item ${itemcode} has no valid current quantity in POS database. Please verify stock before saving/posting.`;
+}
+
+function roundQuantity(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function quantitiesMatch(left: number, right: number) {
+  return Math.abs(left - right) < 0.005;
+}
+
+function buildBlockedPostAudit(input: {
+  eventType: BlockedPostAudit['eventType'];
+  header: HeaderRow;
+  actor: AuthenticatedUser;
+  reason: string;
+  items: BlockedPostAudit['details']['items'];
+}): BlockedPostAudit {
+  const firstItem = input.items[0];
+  return {
+    eventType: input.eventType,
+    qaId: input.header.qaId,
+    qaNo: cleanString(input.header.qaNo),
+    actor: input.actor,
+    details: {
+      qaNo: cleanString(input.header.qaNo),
+      itemcode: firstItem?.itemcode ?? null,
+      savedQty: firstItem?.savedQty ?? null,
+      liveQty: firstItem?.liveQty ?? null,
+      user: input.actor.username,
+      timestamp: new Date().toISOString(),
+      reason: input.reason,
+      items: input.items,
+    },
+  };
+}
+
+async function recordBlockedPostAudit(input: BlockedPostAudit) {
+  const pool = await getSqlPool();
+  await recordAuditEvent(pool, {
+    eventType: input.eventType,
+    entityType: 'QA_HEADER',
+    entityId: input.qaId,
+    actorUserId: input.actor.id,
+    actorUsername: input.actor.username,
+    details: input.details,
+  });
 }
 
 interface AdjustmentDetail {
@@ -92,6 +181,8 @@ interface AdjustmentDetail {
   oldQty: number;
   adjustQty: number;
   newQty: number;
+  postedOldQty: number | null;
+  postedNewQty: number | null;
   entryMode: 'DELTA' | 'SET';
   requestedQty: number;
   itemRemark: string | null;
@@ -238,6 +329,8 @@ async function getDetailsByQaId(executor: ConnectionPool | Transaction, qaId: nu
         old_qty AS oldQty,
         adjust_qty AS adjustQty,
         new_qty AS newQty,
+        posted_old_qty AS postedOldQty,
+        posted_new_qty AS postedNewQty,
         entry_mode AS entryMode,
         requested_qty AS requestedQty,
         item_remark AS itemRemark,
@@ -260,6 +353,8 @@ async function getDetailsByQaId(executor: ConnectionPool | Transaction, qaId: nu
       oldQty: toNumber(row.oldQty),
       adjustQty,
       newQty: toNumber(row.newQty),
+      postedOldQty: row.postedOldQty != null ? toNumber(row.postedOldQty) : null,
+      postedNewQty: row.postedNewQty != null ? toNumber(row.postedNewQty) : null,
       entryMode: mode,
       requestedQty,
       itemRemark: cleanString(row.itemRemark) || null,
@@ -271,7 +366,8 @@ async function getDetailsByQaId(executor: ConnectionPool | Transaction, qaId: nu
 async function getItemRowsByCodes(
   executor: ConnectionPool | Transaction,
   itemcodes: string[],
-  lockRows = false
+  lockRows = false,
+  onInvalidQuantity?: (itemcode: string, value: unknown) => void
 ): Promise<Map<string, ItemSnapshotRow>> {
   const uniqueCodes = [...new Set(itemcodes.map((itemcode) => itemcode.trim()))];
   if (uniqueCodes.length === 0) {
@@ -299,14 +395,25 @@ async function getItemRowsByCodes(
   `);
 
   return new Map(
-    (result.recordset as Array<Record<string, unknown>>).map((row) => [
-      cleanString(row.itemcode),
-      {
-        itemcode: cleanString(row.itemcode),
-        itemname: cleanString(row.itemname),
-        quantity: toNumber(row.end_qty),
-      },
-    ])
+    (result.recordset as Array<Record<string, unknown>>).map((row) => {
+      const itemcode = cleanString(row.itemcode);
+      let quantity: number;
+      try {
+        quantity = parseRequiredQuantity(row.end_qty, itemcode);
+      } catch (error) {
+        onInvalidQuantity?.(itemcode, row.end_qty);
+        throw error;
+      }
+
+      return [
+        itemcode,
+        {
+          itemcode,
+          itemname: cleanString(row.itemname),
+          quantity,
+        },
+      ];
+    })
   );
 }
 
@@ -360,7 +467,7 @@ async function replaceDetails(
       .filter((line) => !itemRows.has(line.itemcode))
       .map((line) => line.itemcode);
 
-    throw unprocessable('One or more items do not exist', { missing });
+    throw unprocessable(invalidStockMessage(missing[0] ?? 'unknown'), { missing });
   }
 
   await transaction
@@ -374,7 +481,7 @@ async function replaceDetails(
   for (const [index, line] of lines.entries()) {
     const item = itemRows.get(line.itemcode) as ItemSnapshotRow | undefined;
     if (!item) {
-      throw unprocessable(`Item ${line.itemcode} was not found`);
+      throw unprocessable(invalidStockMessage(line.itemcode));
     }
 
     let adjustQty: number;
@@ -553,199 +660,280 @@ export async function updateQuantityAdjustment(
 }
 
 export async function postQuantityAdjustment(qaId: number, actor: AuthenticatedUser) {
-  return withTransaction(async (transaction) => {
-    const header = await getHeaderById(transaction, qaId, true);
-    if (!header) {
-      throw notFound('Quantity adjustment not found');
-    }
+  let blockedPostAudit: BlockedPostAudit | null = null;
 
-    if (header.status === 'PENDING_CANCELLATION') {
-      return finalizeQuantityAdjustmentCancellation(transaction, header, actor);
-    }
-
-    if (header.status === 'POSTED') {
-      throw conflict('Quantity adjustment is already posted');
-    }
-
-    if (header.status === 'CANCELLED') {
-      throw conflict('Cancelled quantity adjustments cannot be posted');
-    }
-
-    if (header.status !== 'SAVED') {
-      throw conflict('Only saved quantity adjustments can be posted');
-    }
-
-    const details = (await getDetailsByQaId(transaction, qaId)) as AdjustmentDetail[];
-    if (details.length === 0) {
-      throw unprocessable('Cannot post an empty quantity adjustment');
-    }
-
-    if (details.length > MAX_QA_LINES) {
-      throw badRequest(MAX_QA_LINES_MESSAGE);
-    }
-
-    const qaNumber = isDraftQaNumber(header.qaNo)
-      ? await generateNextQaNumberInTransaction(transaction)
-      : { value: header.qaNo };
-
-    const itemRows = await getItemRowsByCodes(
-      transaction,
-      details.map((detail: AdjustmentDetail) => detail.itemcode),
-      true
-    );
-
-    let inventoryRowsInserted = 0;
-
-    for (const detail of details) {
-      const currentItem = itemRows.get(detail.itemcode) as ItemSnapshotRow | undefined;
-      if (!currentItem) {
-        throw unprocessable(`Item ${detail.itemcode} no longer exists`);
+  try {
+    return await withTransaction(async (transaction) => {
+      const header = await getHeaderById(transaction, qaId, true);
+      if (!header) {
+        throw notFound('Quantity adjustment not found');
       }
 
-      const currentQty = currentItem.quantity;
-      const newQty =
-        detail.entryMode === 'SET'
-          ? detail.requestedQty
-          : currentQty + detail.adjustQty;
-      const legacyUserId = (actor.legacyUserId ?? actor.username).slice(0, 10);
-      const legacyRefNo = `${header.refType}-${header.refNo}`.slice(0, 10);
-      const visibleQaNo = cleanString(qaNumber.value);
-      const legacyBatchNo = visibleQaNo.slice(-10);
+      if (header.status === 'PENDING_CANCELLATION') {
+        return finalizeQuantityAdjustmentCancellation(transaction, header, actor);
+      }
+
+      if (header.status === 'POSTED') {
+        throw conflict('Quantity adjustment is already posted');
+      }
+
+      if (header.status === 'CANCELLED') {
+        throw conflict('Cancelled quantity adjustments cannot be posted');
+      }
+
+      if (header.status !== 'SAVED') {
+        throw conflict('Only saved quantity adjustments can be posted');
+      }
+
+      const details = (await getDetailsByQaId(transaction, qaId)) as AdjustmentDetail[];
+      if (details.length === 0) {
+        throw unprocessable('Cannot post an empty quantity adjustment');
+      }
+
+      if (details.length > MAX_QA_LINES) {
+        throw badRequest(MAX_QA_LINES_MESSAGE);
+      }
+
+      const invalidItems: BlockedPostAudit['details']['items'] = [];
+      let itemRows: Map<string, ItemSnapshotRow>;
+      try {
+        itemRows = await getItemRowsByCodes(
+          transaction,
+          details.map((detail: AdjustmentDetail) => detail.itemcode),
+          true,
+          (itemcode) => {
+            const savedDetail = details.find((detail) => detail.itemcode === itemcode);
+            invalidItems.push({
+              itemcode,
+              savedQty: savedDetail?.oldQty ?? null,
+              liveQty: null,
+              reason: invalidStockMessage(itemcode),
+            });
+          }
+        );
+      } catch (error) {
+        if (invalidItems.length > 0) {
+          blockedPostAudit = buildBlockedPostAudit({
+            eventType: 'QA_POST_BLOCKED_INVALID_STOCK',
+            header,
+            actor,
+            reason: 'Invalid live stock quantity',
+            items: invalidItems,
+          });
+        }
+        throw error;
+      }
+
+      const missingItems = details
+        .filter((detail) => !itemRows.has(detail.itemcode))
+        .map((detail) => ({
+          itemcode: detail.itemcode,
+          savedQty: detail.oldQty,
+          liveQty: null,
+          reason: invalidStockMessage(detail.itemcode),
+        }));
+
+      if (missingItems.length > 0) {
+        blockedPostAudit = buildBlockedPostAudit({
+          eventType: 'QA_POST_BLOCKED_INVALID_STOCK',
+          header,
+          actor,
+          reason: 'Missing item in POS database',
+          items: missingItems,
+        });
+        throw unprocessable(invalidStockMessage(missingItems[0].itemcode), {
+          missing: missingItems.map((item) => item.itemcode),
+        });
+      }
+
+      const staleItems: StaleStockConflictItem[] = [];
+      for (const detail of details) {
+        const currentItem = itemRows.get(detail.itemcode) as ItemSnapshotRow;
+        const savedQty = roundQuantity(detail.oldQty);
+        const liveQty = roundQuantity(currentItem.quantity);
+
+        if (!quantitiesMatch(savedQty, liveQty)) {
+          staleItems.push({
+            itemcode: detail.itemcode,
+            savedQty,
+            liveQty,
+            difference: roundQuantity(liveQty - savedQty),
+          });
+        }
+      }
+
+      if (staleItems.length > 0) {
+        blockedPostAudit = buildBlockedPostAudit({
+          eventType: 'QA_POST_BLOCKED_STALE_STOCK',
+          header,
+          actor,
+          reason: STALE_STOCK_MESSAGE,
+          items: staleItems,
+        });
+        throw conflict(STALE_STOCK_MESSAGE, { items: staleItems });
+      }
+
+      const qaNumber = isDraftQaNumber(header.qaNo)
+        ? await generateNextQaNumberInTransaction(transaction)
+        : { value: header.qaNo };
+
+      let inventoryRowsInserted = 0;
+
+      for (const detail of details) {
+        const currentItem = itemRows.get(detail.itemcode) as ItemSnapshotRow;
+        const currentQty = currentItem.quantity;
+        const newQty =
+          detail.entryMode === 'SET'
+            ? detail.requestedQty
+            : currentQty + detail.adjustQty;
+        const legacyUserId = (actor.legacyUserId ?? actor.username).slice(0, 10);
+        const legacyRefNo = `${header.refType}-${header.refNo}`.slice(0, 10);
+        const visibleQaNo = cleanString(qaNumber.value);
+        const legacyBatchNo = visibleQaNo.slice(-10);
+
+        await transaction
+          .request()
+          .input('detailId', sql.BigInt, Number(detail.id))
+          .input('postedOldQty', sql.Decimal(18, 2), currentQty)
+          .input('postedNewQty', sql.Decimal(18, 2), newQty)
+          .query(`
+            UPDATE [${env.UTILITY_SCHEMA}].[qa_detail]
+            SET
+              posted_old_qty = @postedOldQty,
+              posted_new_qty = @postedNewQty,
+              new_qty = @postedNewQty,
+              updated_at = SYSUTCDATETIME()
+            WHERE detail_id = @detailId
+          `);
+
+        await transaction
+          .request()
+          .input('itemcode', sql.NVarChar, detail.itemcode)
+          .input('newQty', sql.Decimal(18, 2), newQty)
+          .input('adjustQty', sql.Decimal(18, 2), detail.adjustQty)
+          .input('modifiedBy', sql.NVarChar, actor.username.slice(0, 12))
+          .query(`
+            UPDATE items
+            SET
+              end_qty = @newQty,
+              END_QTY_TEMP = @newQty,
+              ASSEMBLY_QTY = @newQty,
+              adjustment = ISNULL(adjustment, 0) + @adjustQty,
+              modified_by = @modifiedBy,
+              date_modified = GETDATE()
+            WHERE itemcode = @itemcode
+          `);
+
+        await transaction
+          .request()
+          .input('transDate', sql.DateTime, header.transDate)
+          .input('qty', sql.Decimal(18, 2), detail.adjustQty)
+          .input('userid', sql.Char(10), legacyUserId)
+          .input('posted', sql.Numeric(18, 0), 1)
+          .input('remarks', sql.NVarChar, detail.itemRemark?.slice(0, 50) ?? null)
+          .input('endQty', sql.Decimal(18, 2), newQty)
+          .input('balance', sql.Decimal(18, 2), currentQty)
+          .input('newQty', sql.Decimal(18, 2), newQty)
+          .input('itemname', sql.NVarChar, detail.itemname)
+          .input('machineId', sql.NVarChar, 'UTILITY')
+          .input('sync', sql.TinyInt, 0)
+          .input('batchNo', sql.NVarChar, legacyBatchNo)
+          .input('refNo', sql.Char(10), legacyRefNo)
+          .input('itemcode', sql.NVarChar, detail.itemcode)
+          .query(`
+            INSERT INTO inventory_adjustment (
+              trans_date,
+              qty,
+              userid,
+              posted,
+              remarks,
+              end_qty,
+              balance,
+              new_qty,
+              itemname,
+              machine_id,
+              sync,
+              BATCH_NO,
+              ref_no,
+              itemcode
+            )
+            VALUES (
+              @transDate,
+              @qty,
+              @userid,
+              @posted,
+              @remarks,
+              @endQty,
+              @balance,
+              @newQty,
+              @itemname,
+              @machineId,
+              @sync,
+              @batchNo,
+              @refNo,
+              @itemcode
+            )
+          `);
+
+        inventoryRowsInserted += 1;
+      }
 
       await transaction
         .request()
-        .input('detailId', sql.BigInt, Number(detail.id))
-        .input('oldQty', sql.Decimal(18, 2), currentQty)
-        .input('newQty', sql.Decimal(18, 2), newQty)
+        .input('qaId', sql.BigInt, qaId)
+        .input('qaNo', sql.NVarChar, cleanString(qaNumber.value))
+        .input('postedBy', sql.BigInt, actor.id)
+        .input('postedByUsername', sql.NVarChar, actor.username)
         .query(`
-          UPDATE [${env.UTILITY_SCHEMA}].[qa_detail]
+          UPDATE [${env.UTILITY_SCHEMA}].[qa_header]
           SET
-            old_qty = @oldQty,
-            new_qty = @newQty,
+            qa_no = @qaNo,
+            status = 'POSTED',
+            posted_by = @postedBy,
+            posted_by_username = @postedByUsername,
+            posted_at = SYSUTCDATETIME(),
+            updated_by = @postedBy,
+            updated_by_username = @postedByUsername,
             updated_at = SYSUTCDATETIME()
-          WHERE detail_id = @detailId
+          WHERE qa_id = @qaId
         `);
 
       await transaction
         .request()
-        .input('itemcode', sql.NVarChar, detail.itemcode)
-        .input('newQty', sql.Decimal(18, 2), newQty)
-        .input('adjustQty', sql.Decimal(18, 2), detail.adjustQty)
-        .input('modifiedBy', sql.NVarChar, actor.username.slice(0, 12))
+        .input('qaId', sql.BigInt, qaId)
+        .input('postedBy', sql.BigInt, actor.id)
+        .input('inventoryRowsInserted', sql.Int, inventoryRowsInserted)
         .query(`
-          UPDATE items
-          SET
-            end_qty = @newQty,
-            END_QTY_TEMP = @newQty,
-            ASSEMBLY_QTY = @newQty,
-            adjustment = ISNULL(adjustment, 0) + @adjustQty,
-            modified_by = @modifiedBy,
-            date_modified = GETDATE()
-          WHERE itemcode = @itemcode
+          INSERT INTO [${env.UTILITY_SCHEMA}].[qa_posting_log] (
+            qa_id,
+            inventory_rows_inserted,
+            posted_by
+          )
+          VALUES (@qaId, @inventoryRowsInserted, @postedBy)
         `);
 
-      await transaction
-        .request()
-        .input('transDate', sql.DateTime, header.transDate)
-        .input('qty', sql.Decimal(18, 2), detail.adjustQty)
-        .input('userid', sql.Char(10), legacyUserId)
-        .input('posted', sql.Numeric(18, 0), 1)
-        .input('remarks', sql.NVarChar, detail.itemRemark?.slice(0, 50) ?? null)
-        .input('endQty', sql.Decimal(18, 2), newQty)
-        .input('balance', sql.Decimal(18, 2), currentQty)
-        .input('newQty', sql.Decimal(18, 2), newQty)
-        .input('itemname', sql.NVarChar, detail.itemname)
-        .input('machineId', sql.NVarChar, 'UTILITY')
-        .input('sync', sql.TinyInt, 0)
-        .input('batchNo', sql.NVarChar, legacyBatchNo)
-        .input('refNo', sql.Char(10), legacyRefNo)
-        .input('itemcode', sql.NVarChar, detail.itemcode)
-        .query(`
-          INSERT INTO inventory_adjustment (
-            trans_date,
-            qty,
-            userid,
-            posted,
-            remarks,
-            end_qty,
-            balance,
-            new_qty,
-            itemname,
-            machine_id,
-            sync,
-            BATCH_NO,
-            ref_no,
-            itemcode
-          )
-          VALUES (
-            @transDate,
-            @qty,
-            @userid,
-            @posted,
-            @remarks,
-            @endQty,
-            @balance,
-            @newQty,
-            @itemname,
-            @machineId,
-            @sync,
-            @batchNo,
-            @refNo,
-            @itemcode
-          )
-        `);
+      await recordAuditEvent(transaction, {
+        eventType: 'ADJUSTMENT_POSTED',
+        entityType: 'QA_HEADER',
+        entityId: qaId,
+        actorUserId: actor.id,
+        actorUsername: actor.username,
+        details: {
+          lineCount: details.length,
+          qaNo: cleanString(qaNumber.value),
+        },
+      });
 
-      inventoryRowsInserted += 1;
+      return getQuantityAdjustmentById(String(qaId), transaction);
+    }, sql.ISOLATION_LEVEL.SERIALIZABLE);
+  } catch (error) {
+    if (blockedPostAudit) {
+      await recordBlockedPostAudit(blockedPostAudit).catch((auditError: unknown) => {
+        console.error('Failed to record blocked QA post audit event:', auditError);
+      });
     }
-
-    await transaction
-      .request()
-      .input('qaId', sql.BigInt, qaId)
-      .input('qaNo', sql.NVarChar, cleanString(qaNumber.value))
-      .input('postedBy', sql.BigInt, actor.id)
-      .input('postedByUsername', sql.NVarChar, actor.username)
-      .query(`
-        UPDATE [${env.UTILITY_SCHEMA}].[qa_header]
-        SET
-          qa_no = @qaNo,
-          status = 'POSTED',
-          posted_by = @postedBy,
-          posted_by_username = @postedByUsername,
-          posted_at = SYSUTCDATETIME(),
-          updated_by = @postedBy,
-          updated_by_username = @postedByUsername,
-          updated_at = SYSUTCDATETIME()
-        WHERE qa_id = @qaId
-      `);
-
-    await transaction
-      .request()
-      .input('qaId', sql.BigInt, qaId)
-      .input('postedBy', sql.BigInt, actor.id)
-      .input('inventoryRowsInserted', sql.Int, inventoryRowsInserted)
-      .query(`
-        INSERT INTO [${env.UTILITY_SCHEMA}].[qa_posting_log] (
-          qa_id,
-          inventory_rows_inserted,
-          posted_by
-        )
-        VALUES (@qaId, @inventoryRowsInserted, @postedBy)
-      `);
-
-    await recordAuditEvent(transaction, {
-      eventType: 'ADJUSTMENT_POSTED',
-      entityType: 'QA_HEADER',
-      entityId: qaId,
-      actorUserId: actor.id,
-      actorUsername: actor.username,
-      details: {
-        lineCount: details.length,
-        qaNo: cleanString(qaNumber.value),
-      },
-    });
-
-    return getQuantityAdjustmentById(String(qaId), transaction);
-  }, sql.ISOLATION_LEVEL.SERIALIZABLE);
+    throw error;
+  }
 }
 
 async function finalizeQuantityAdjustmentCancellation(

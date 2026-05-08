@@ -81,7 +81,7 @@ function buildPreview(format: QaNumberFormat, nextValue: number) {
 
 export default function QaNumberingSettings() {
   const { hasRole } = useAuth();
-  const canAccess = hasRole('Admin', 'Supervisor');
+  const canAccess = hasRole('Admin');
 
   const [settings, setSettings] = useState<QaNumberingSettings | null>(null);
   const [format, setFormat] = useState<QaNumberFormat>(DEFAULT_FORMAT);

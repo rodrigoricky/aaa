@@ -112,7 +112,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/audit-logs', label: 'Audit Logs', icon: <IconClipboard />, requiredPermission: 'auditRead' },
   { path: '/users', label: 'Users', icon: <IconUsers />, requiredPermission: 'usersRead' },
   { path: '/permissions', label: 'Permissions', icon: <IconShield />, requiredPermission: 'permissionsRead' },
-  { path: '/settings/qa-numbering', label: 'QA Numbering', icon: <IconHash />, allowedRoles: ['Admin', 'Supervisor'] },
+  { path: '/settings/qa-numbering', label: 'QA Numbering', icon: <IconHash />, allowedRoles: ['Admin'] },
 ];
 
 interface SidebarProps {

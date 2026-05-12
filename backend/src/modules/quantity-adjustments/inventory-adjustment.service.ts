@@ -1,28 +1,44 @@
 import type { Transaction } from 'mssql';
 import { sql } from '../../shared/database/sql-server.js';
 import { unprocessable } from '../../shared/errors/http-errors.js';
-import { cleanString, parseRequiredQuantity } from '../../shared/utils/value.js';
+import { cleanString } from '../../shared/utils/value.js';
 import {
-  calculateInventoryAdjustment,
+  calculateLegacyCompatibleAdjustment,
   type InventoryAdjustmentCalculation,
 } from './inventory-adjustment-calculator.js';
 
 interface LockedItemStock {
   itemcode: string;
   itemname: string;
-  currentStock: number;
+}
+
+interface LegacyPosStockBreakdown {
+  begQty: number;
+  deliveryTotal: number;
+  salesTotal: number;
+  pulloutTotal: number;
+  adjustmentTotal: number;
+  computedStock: number;
 }
 
 interface AdjustInventoryInput {
   itemcode: string;
   itemname: string;
-  adjustmentQty: number;
+  desiredFinalStock: number;
   transDate: Date;
   remarks: string | null;
   legacyUserId: string;
   legacyRefNo: string;
   legacyBatchNo: string;
-  modifiedBy: string;
+}
+
+function toRoundedNumber(value: unknown, fieldName: string, itemcode: string) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw unprocessable(`Unable to compute ${fieldName} for item ${itemcode}. Please verify stock before saving/posting.`);
+  }
+
+  return Number(numeric.toFixed(2));
 }
 
 async function getLockedItemStock(
@@ -35,9 +51,8 @@ async function getLockedItemStock(
     .query(`
       SELECT TOP 1
         itemcode,
-        itemname,
-        end_qty
-      FROM items WITH (UPDLOCK, HOLDLOCK, ROWLOCK)
+        itemname
+      FROM items WITH (UPDLOCK, ROWLOCK)
       WHERE itemcode = @itemcode
     `);
 
@@ -50,7 +65,73 @@ async function getLockedItemStock(
   return {
     itemcode: lockedItemcode,
     itemname: cleanString(row.itemname),
-    currentStock: parseRequiredQuantity(row.end_qty, lockedItemcode),
+  };
+}
+
+export async function computeLegacyPosStock(
+  transaction: Transaction,
+  itemcode: string
+): Promise<LegacyPosStockBreakdown> {
+  const result = await transaction
+    .request()
+    .input('itemcode', sql.NVarChar, itemcode)
+    .query(`
+      DECLARE @begQty DECIMAL(18, 2) = 0;
+      DECLARE @deliveryTotal DECIMAL(18, 2) = 0;
+      DECLARE @salesTotal DECIMAL(18, 2) = 0;
+      DECLARE @pulloutTotal DECIMAL(18, 2) = 0;
+      DECLARE @adjustmentTotal DECIMAL(18, 2) = 0;
+
+      SELECT TOP 1
+        @begQty = ISNULL(CONVERT(DECIMAL(18, 2), i.beg_qty), 0)
+      FROM dbo.items i WITH (UPDLOCK, ROWLOCK)
+      WHERE i.itemcode = @itemcode;
+
+      SELECT
+        @deliveryTotal = ISNULL(SUM(CONVERT(DECIMAL(18, 2), d.qty)), 0)
+      FROM dbo.delivery d
+      WHERE d.itemcode = @itemcode
+        AND ISNULL(CONVERT(INT, d.posted), 0) = 1;
+
+      SELECT
+        @salesTotal = ISNULL(SUM(CONVERT(DECIMAL(18, 2), s.qty)), 0)
+      FROM dbo.sales s
+      WHERE s.itemcode = @itemcode
+        AND ISNULL(CONVERT(INT, s.posted), 0) = 1;
+
+      SELECT
+        @pulloutTotal = ISNULL(SUM(CONVERT(DECIMAL(18, 2), p.qty)), 0)
+      FROM dbo.pullout p
+      WHERE p.itemcode = @itemcode
+        AND ISNULL(CONVERT(INT, p.posted), 0) = 1;
+
+      SELECT
+        @adjustmentTotal = ISNULL(SUM(CONVERT(DECIMAL(18, 2), a.qty)), 0)
+      FROM dbo.inventory_adjustment a
+      WHERE a.itemcode = @itemcode
+        AND ISNULL(CONVERT(INT, a.posted), 0) = 1;
+
+      SELECT
+        @begQty AS begQty,
+        @deliveryTotal AS deliveryTotal,
+        @salesTotal AS salesTotal,
+        @pulloutTotal AS pulloutTotal,
+        @adjustmentTotal AS adjustmentTotal,
+        (@begQty + @deliveryTotal - @salesTotal - @pulloutTotal + @adjustmentTotal) AS computedStock;
+    `);
+
+  const row = result.recordset[0] as Record<string, unknown> | undefined;
+  if (!row) {
+    throw unprocessable(`Unable to compute legacy POS stock for item ${itemcode}.`);
+  }
+
+  return {
+    begQty: toRoundedNumber(row.begQty, 'beg_qty', itemcode),
+    deliveryTotal: toRoundedNumber(row.deliveryTotal, 'delivery total', itemcode),
+    salesTotal: toRoundedNumber(row.salesTotal, 'sales total', itemcode),
+    pulloutTotal: toRoundedNumber(row.pulloutTotal, 'pullout total', itemcode),
+    adjustmentTotal: toRoundedNumber(row.adjustmentTotal, 'adjustment total', itemcode),
+    computedStock: toRoundedNumber(row.computedStock, 'computed stock', itemcode),
   };
 }
 
@@ -59,11 +140,17 @@ export async function adjustInventory(
   input: AdjustInventoryInput
 ): Promise<InventoryAdjustmentCalculation> {
   const item = await getLockedItemStock(transaction, input.itemcode);
-  const calculation = calculateInventoryAdjustment(
-    item.currentStock,
-    input.adjustmentQty,
-    item.itemcode
-  );
+  const legacyStock = await computeLegacyPosStock(transaction, item.itemcode);
+
+  // Legacy POS compatibility:
+  // The old POS recomputes items.end_qty from posted transaction tables
+  // (sp_update_stock_inventory). Convert desired final stock to
+  // inventory_adjustment.qty delta against the same ledger-based stock.
+  const calculation = calculateLegacyCompatibleAdjustment({
+    computedStockInput: legacyStock.computedStock,
+    desiredFinalStockInput: input.desiredFinalStock,
+    itemcode: item.itemcode,
+  });
 
   const oldBalance = calculation.oldBalance;
   const adjustmentQty = calculation.adjustmentQty;
@@ -84,7 +171,12 @@ export async function adjustInventory(
     .input('qty', sql.Decimal(18, 2), adjustmentQty)
     .input('userid', sql.Char(10), input.legacyUserId)
     .input('posted', sql.Numeric(18, 0), 1)
-    .input('remarks', sql.NVarChar, input.remarks?.slice(0, 50) ?? null)
+    .input(
+      'remarks',
+      sql.NVarChar,
+      `${cleanString(input.remarks) || ''}${cleanString(input.remarks) ? ' | ' : ''}Final stock correction`
+        .slice(0, 50)
+    )
     .input('endQty', sql.Decimal(18, 2), legacyEndQty)
     .input('balance', sql.Decimal(18, 2), legacyBalance)
     .input('newQty', sql.Decimal(18, 2), legacyNewQty)
@@ -135,8 +227,6 @@ export async function adjustInventory(
     .request()
     .input('itemcode', sql.NVarChar, item.itemcode)
     .input('finalStock', sql.Decimal(18, 2), finalStock)
-    .input('adjustmentQty', sql.Decimal(18, 2), adjustmentQty)
-    .input('modifiedBy', sql.NVarChar, input.modifiedBy)
     .query(`
       UPDATE items
       SET
@@ -147,10 +237,7 @@ export async function adjustInventory(
         end_qty = @finalStock,
         END_QTY_TEMP = @finalStock,
         ASSEMBLY_QTY = @finalStock,
-        assembly_box = @finalStock,
-        adjustment = ISNULL(adjustment, 0) + @adjustmentQty,
-        modified_by = @modifiedBy,
-        date_modified = GETDATE()
+        assembly_box = @finalStock
       WHERE itemcode = @itemcode
     `);
 
@@ -165,6 +252,8 @@ export async function adjustInventory(
     .query(`
       IF OBJECT_ID(N'dbo.delivery', N'U') IS NOT NULL
          AND COL_LENGTH(N'dbo.delivery', N'itemcode') IS NOT NULL
+         AND COL_LENGTH(N'dbo.delivery', N'qty') IS NOT NULL
+         AND COL_LENGTH(N'dbo.delivery', N'qty2') IS NOT NULL
       BEGIN
         UPDATE dbo.delivery
         SET

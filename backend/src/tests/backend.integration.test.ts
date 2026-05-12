@@ -37,6 +37,7 @@ if (!hasRequiredDbEnv) {
     assemblyBox: number;
     assemblyQuantity: number;
     adjustment: number;
+    begQty: number;
   };
   let originalQaNumbering: { nextValue: number; format: string };
 
@@ -219,17 +220,35 @@ if (!hasRequiredDbEnv) {
 
   async function setTestItemQuantity(quantity: number) {
     const pool = await getSqlPool();
+    // Also sync beg_qty so computeLegacyPosStock (ledger formula) equals
+    // the desired quantity. Formula:
+    //   computedStock = beg_qty + deliveryTotal - salesTotal - pulloutTotal + adjustmentTotal
+    // => beg_qty = quantity - deliveryTotal + salesTotal + pulloutTotal - adjustmentTotal
     await pool
       .request()
       .input('itemcode', TEST_ITEMCODE)
       .input('quantity', sql.Decimal(18, 2), quantity)
       .query(`
+        DECLARE @deliveryTotal DECIMAL(18, 2) = ISNULL(
+          (SELECT SUM(CONVERT(DECIMAL(18, 2), qty)) FROM dbo.delivery
+           WHERE itemcode = @itemcode AND ISNULL(CONVERT(INT, posted), 0) = 1), 0);
+        DECLARE @salesTotal DECIMAL(18, 2) = ISNULL(
+          (SELECT SUM(CONVERT(DECIMAL(18, 2), qty)) FROM dbo.sales
+           WHERE itemcode = @itemcode AND ISNULL(CONVERT(INT, posted), 0) = 1), 0);
+        DECLARE @pulloutTotal DECIMAL(18, 2) = ISNULL(
+          (SELECT SUM(CONVERT(DECIMAL(18, 2), qty)) FROM dbo.pullout
+           WHERE itemcode = @itemcode AND ISNULL(CONVERT(INT, posted), 0) = 1), 0);
+        DECLARE @adjustmentTotal DECIMAL(18, 2) = ISNULL(
+          (SELECT SUM(CONVERT(DECIMAL(18, 2), qty)) FROM dbo.inventory_adjustment
+           WHERE itemcode = @itemcode AND ISNULL(CONVERT(INT, posted), 0) = 1), 0);
+
         UPDATE items
         SET
           end_qty = @quantity,
           END_QTY_TEMP = @quantity,
           assembly_box = @quantity,
-          ASSEMBLY_QTY = @quantity
+          ASSEMBLY_QTY = @quantity,
+          beg_qty = @quantity - @deliveryTotal + @salesTotal + @pulloutTotal - @adjustmentTotal
         WHERE itemcode = @itemcode
       `);
   }
@@ -490,7 +509,8 @@ if (!hasRequiredDbEnv) {
         END_QTY_TEMP AS endQtyTemp,
         assembly_box AS assemblyBox,
         ASSEMBLY_QTY AS assemblyQty,
-        adjustment
+        adjustment,
+        beg_qty AS begQty
       FROM items
       WHERE itemcode = @itemcode
     `);
@@ -509,6 +529,7 @@ if (!hasRequiredDbEnv) {
       assemblyBox: Number(itemResult.recordset[0].assemblyBox ?? 0),
       assemblyQuantity: Number(itemResult.recordset[0].assemblyQty ?? 0),
       adjustment: Number(itemResult.recordset[0].adjustment ?? 0),
+      begQty: Number(itemResult.recordset[0].begQty ?? 0),
     };
 
     originalQaNumbering = {
@@ -530,6 +551,7 @@ if (!hasRequiredDbEnv) {
       .input('assemblyBox', sql.Decimal(18, 2), originalItemState.assemblyBox)
       .input('assemblyQty', sql.Decimal(18, 2), originalItemState.assemblyQuantity)
       .input('adjustment', sql.Decimal(18, 2), originalItemState.adjustment)
+      .input('begQty', sql.Decimal(18, 2), originalItemState.begQty)
       .input('qaNextValue', sql.BigInt, originalQaNumbering.nextValue)
       .input('qaFormat', sql.NVarChar, originalQaNumbering.format)
       .query(`
@@ -539,7 +561,8 @@ if (!hasRequiredDbEnv) {
           END_QTY_TEMP = @endQtyTemp,
           assembly_box = @assemblyBox,
           ASSEMBLY_QTY = @assemblyQty,
-          adjustment = @adjustment
+          adjustment = @adjustment,
+          beg_qty = @begQty
         WHERE itemcode = @itemcode
 
         UPDATE [${utilitySchema}].[qa_numbering]

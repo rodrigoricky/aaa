@@ -793,13 +793,12 @@ export async function postQuantityAdjustment(qaId: number, actor: AuthenticatedU
         const postedAdjustment = await adjustInventory(transaction, {
           itemcode: detail.itemcode,
           itemname: detail.itemname,
-          adjustmentQty: detail.adjustQty,
+          desiredFinalStock: detail.newQty,
           transDate: header.transDate,
           remarks: detail.itemRemark,
           legacyUserId,
           legacyRefNo,
           legacyBatchNo,
-          modifiedBy: actor.username.slice(0, 12),
         });
 
         await transaction

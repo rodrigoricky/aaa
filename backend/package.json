@@ -10,6 +10,8 @@
     "db:init": "node --import tsx src/scripts/init-utility-schema.ts",
     "db:invadj": "node --import tsx src/scripts/db-invadj.ts",
     "db:invadj:dry": "node --import tsx src/scripts/db-invadj.ts --dry-run",
+    "db:invadj:merge": "node --import tsx src/scripts/db-invadj-merge.ts",
+    "db:invadj:merge:dry": "node --import tsx src/scripts/db-invadj-merge.ts --dry-run",
     "demo:on": "node --import tsx src/scripts/demo-on.ts",
     "demo:off": "node --import tsx src/scripts/demo-off.ts",
     "test": "npm run build && node --test dist/tests/*.test.js"
@@ -36,3 +38,4 @@
     "typescript": "^5.4.3"
   }
 }
+

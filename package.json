@@ -10,6 +10,8 @@
     "db:init": "npm run db:init --prefix backend",
     "db:invadj": "npm run db:invadj --prefix backend --",
     "db:invadj:dry": "npm run db:invadj:dry --prefix backend",
+    "db:invadj:merge": "npm run db:invadj:merge --prefix backend --",
+    "db:invadj:merge:dry": "npm run db:invadj:merge:dry --prefix backend",
     "demo:on": "npm run demo:on --prefix backend",
     "demo:off": "npm run demo:off --prefix backend",
     "test:backend": "npm run test --prefix backend",

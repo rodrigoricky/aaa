@@ -14,6 +14,10 @@
     "db:invadj:merge:dry": "node --import tsx src/scripts/db-invadj-merge.ts --dry-run",
     "demo:on": "node --import tsx src/scripts/demo-on.ts",
     "demo:off": "node --import tsx src/scripts/demo-off.ts",
+    "db:inventory:authority-check": "node --import tsx src/scripts/db-inventory-authority-check.ts",
+    "db:inventory:authority-check:dry": "node --import tsx src/scripts/db-inventory-authority-check.ts --dry-run",
+    "db:inventory:authority-apply": "node --import tsx src/scripts/db-inventory-authority-apply.ts",
+    "db:inventory:authority-apply:dry": "node --import tsx src/scripts/db-inventory-authority-apply.ts --dry-run",
     "test": "npm run build && node --test dist/tests/*.test.js"
   },
   "dependencies": {

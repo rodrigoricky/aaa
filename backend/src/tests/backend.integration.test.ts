@@ -357,6 +357,7 @@ if (!hasRequiredDbEnv) {
     hasItemcode: boolean;
     hasQty: boolean;
     hasQty2: boolean;
+    hasId: boolean;
   }
 
   async function getDeliveryMirrorSupport(): Promise<DeliveryMirrorSupport> {
@@ -366,7 +367,8 @@ if (!hasRequiredDbEnv) {
         CASE WHEN OBJECT_ID(N'dbo.delivery', N'U') IS NOT NULL THEN 1 ELSE 0 END AS hasDeliveryTable,
         CASE WHEN COL_LENGTH(N'dbo.delivery', N'itemcode') IS NOT NULL THEN 1 ELSE 0 END AS hasItemcode,
         CASE WHEN COL_LENGTH(N'dbo.delivery', N'qty') IS NOT NULL THEN 1 ELSE 0 END AS hasQty,
-        CASE WHEN COL_LENGTH(N'dbo.delivery', N'qty2') IS NOT NULL THEN 1 ELSE 0 END AS hasQty2
+        CASE WHEN COL_LENGTH(N'dbo.delivery', N'qty2') IS NOT NULL THEN 1 ELSE 0 END AS hasQty2,
+        CASE WHEN COL_LENGTH(N'dbo.delivery', N'id') IS NOT NULL THEN 1 ELSE 0 END AS hasId
     `);
 
     const row = result.recordset[0] as Record<string, unknown>;
@@ -375,23 +377,82 @@ if (!hasRequiredDbEnv) {
       hasItemcode: Number(row.hasItemcode) === 1,
       hasQty: Number(row.hasQty) === 1,
       hasQty2: Number(row.hasQty2) === 1,
+      hasId: Number(row.hasId) === 1,
     };
   }
 
   async function getDeliveryMirrorRows(itemcode: string) {
     const pool = await getSqlPool();
+    const support = await getDeliveryMirrorSupport();
+    const result = await pool
+      .request()
+      .input('itemcode', sql.NVarChar, itemcode)
+      .query(
+        support.hasId
+          ? `
+              SELECT
+                CONVERT(BIGINT, id) AS id,
+                qty,
+                qty2
+              FROM dbo.delivery
+              WHERE itemcode = @itemcode
+              ORDER BY CONVERT(BIGINT, id) DESC
+            `
+          : `
+              SELECT
+                CAST(NULL AS BIGINT) AS id,
+                qty,
+                qty2
+              FROM dbo.delivery
+              WHERE itemcode = @itemcode
+            `
+      );
+
+    return result.recordset as Array<Record<string, unknown>>;
+  }
+
+  async function getItemStockFields(itemcode: string) {
+    const pool = await getSqlPool();
     const result = await pool
       .request()
       .input('itemcode', sql.NVarChar, itemcode)
       .query(`
-        SELECT
-          qty,
-          qty2
-        FROM dbo.delivery
+        SELECT TOP 1
+          ISNULL(CONVERT(DECIMAL(18, 2), end_qty),      0) AS endQty,
+          ISNULL(CONVERT(DECIMAL(18, 2), END_QTY_TEMP), 0) AS endQtyTemp,
+          ISNULL(CONVERT(DECIMAL(18, 2), ASSEMBLY_QTY), 0) AS assemblyQty,
+          ISNULL(CONVERT(DECIMAL(18, 2), assembly_box), 0) AS assemblyBox
+        FROM items
         WHERE itemcode = @itemcode
       `);
 
-    return result.recordset as Array<Record<string, unknown>>;
+    const row = result.recordset[0] as Record<string, unknown>;
+    return {
+      endQty: Number(row.endQty ?? 0),
+      endQtyTemp: Number(row.endQtyTemp ?? 0),
+      assemblyQty: Number(row.assemblyQty ?? 0),
+      assemblyBox: Number(row.assemblyBox ?? 0),
+    };
+  }
+
+  async function getLatestUtilityAdjustment(itemcode: string) {
+    const pool = await getSqlPool();
+    const result = await pool
+      .request()
+      .input('itemcode', sql.NVarChar, itemcode)
+      .query(`
+        SELECT TOP 1
+          CONVERT(DECIMAL(18, 2), end_qty) AS endQty,
+          machine_id AS machineId,
+          ISNULL(CONVERT(INT, posted), 0) AS posted
+        FROM inventory_adjustment
+        WHERE itemcode   = @itemcode
+          AND machine_id = 'UTILITY'
+          AND ISNULL(CONVERT(INT, posted), 0) = 1
+        ORDER BY trans_date DESC
+      `);
+
+    return result.recordset[0] as Record<string, unknown> | undefined;
   }
 
   async function insertSavedAdjustmentForMissingItem() {
@@ -1302,10 +1363,131 @@ if (!hasRequiredDbEnv) {
     await setTestItemQuantity(100);
   });
 
-  test('updates matching delivery qty mirrors to final stock', async (t) => {
+  test('quantity adjustment creates authoritative UTILITY-posted adjustment row', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+
+    await setTestItemQuantity(50);
+    const saveResponse = await saveAdjustment(cookie, 10);
+    assert.equal(saveResponse.statusCode, 201);
+    const savedPayload = saveResponse.json();
+
+    const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+    assert.equal(postResponse.statusCode, 200);
+
+    const latestUtility = await getLatestUtilityAdjustment(TEST_ITEMCODE);
+    assert.ok(latestUtility, 'A posted UTILITY adjustment row must exist after posting');
+    assert.equal(String(latestUtility.machineId).trim(), 'UTILITY');
+    assert.equal(Number(latestUtility.posted), 1);
+    assert.equal(Number(latestUtility.endQty), 60);
+
+    await setTestItemQuantity(100);
+  });
+
+  test('six stock fields remain synchronized after posting a quantity adjustment', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+
+    await setTestItemQuantity(200);
+    const saveResponse = await saveAdjustment(cookie, -30);
+    assert.equal(saveResponse.statusCode, 201);
+    const savedPayload = saveResponse.json();
+
+    const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+    assert.equal(postResponse.statusCode, 200);
+
+    // items table: four mirror columns must all equal final stock
+    const fields = await getItemStockFields(TEST_ITEMCODE);
+    assert.equal(fields.endQty, 170, 'items.end_qty must equal final stock');
+    assert.equal(fields.endQtyTemp, 170, 'items.END_QTY_TEMP must equal final stock');
+    assert.equal(fields.assemblyQty, 170, 'items.ASSEMBLY_QTY must equal final stock');
+    assert.equal(fields.assemblyBox, 170, 'items.assembly_box must equal final stock');
+
+    // inventory_adjustment: balance, new_qty, end_qty must all equal final stock
+    const latestUtility = await getLatestUtilityAdjustment(TEST_ITEMCODE);
+    assert.ok(latestUtility);
+    assert.equal(Number(latestUtility.endQty), 170, 'inventory_adjustment.end_qty must equal final stock');
+
+    await setTestItemQuantity(100);
+  });
+
+  test('multiple sequential adjustments keep latest UTILITY value authoritative', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+
+    await setTestItemQuantity(100);
+
+    // First adjustment: 100 → 120
+    const save1 = await saveAdjustment(cookie, 20);
+    assert.equal(save1.statusCode, 201);
+    await postAdjustment(cookie, save1.json().data.id);
+
+    const fields1 = await getItemStockFields(TEST_ITEMCODE);
+    assert.equal(fields1.endQty, 120);
+
+    // Second adjustment: 120 → 90
+    const save2 = await saveAdjustment(cookie, -30);
+    assert.equal(save2.statusCode, 201);
+    await postAdjustment(cookie, save2.json().data.id);
+
+    const fields2 = await getItemStockFields(TEST_ITEMCODE);
+    assert.equal(fields2.endQty, 90);
+    assert.equal(fields2.endQtyTemp, 90);
+    assert.equal(fields2.assemblyQty, 90);
+    assert.equal(fields2.assemblyBox, 90);
+
+    // Latest UTILITY adjustment must reflect the second adjustment's end_qty
+    const latestUtility = await getLatestUtilityAdjustment(TEST_ITEMCODE);
+    assert.ok(latestUtility);
+    assert.equal(Number(latestUtility.endQty), 90, 'Latest UTILITY end_qty must be 90 after second adjustment');
+
+    await setTestItemQuantity(100);
+  });
+
+  test('delivery.qty transaction history is never overwritten by quantity adjustment posting', async (t) => {
+    const support = await getDeliveryMirrorSupport();
+    if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty) {
+      t.skip('test requires dbo.delivery(itemcode, qty)');
+      return;
+    }
+
+    const beforeRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+    if (beforeRows.length === 0) {
+      t.skip('No delivery rows for test itemcode; skipping delivery.qty preservation test');
+      return;
+    }
+
+    try {
+      const cookie = await loginAndGetCookie(ADMIN);
+      await setTestItemQuantity(100);
+
+      const saveResponse = await saveAdjustment(cookie, 25);
+      assert.equal(saveResponse.statusCode, 201);
+      const savedPayload = saveResponse.json();
+
+      const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+      assert.equal(postResponse.statusCode, 200);
+
+      const afterRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+
+      // delivery.qty is transaction history — it must NEVER be modified.
+      const qtyBefore = beforeRows.map((r) => Number(r.qty));
+      const qtyAfter = afterRows.map((r) => Number(r.qty));
+      assert.deepEqual(
+        qtyAfter,
+        qtyBefore,
+        'delivery.qty values must be identical before and after a quantity adjustment post'
+      );
+    } finally {
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('only the most recent delivery row qty2 is updated after posting', async (t) => {
     const support = await getDeliveryMirrorSupport();
     if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
       t.skip('delivery mirror test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+    if (!support.hasId) {
+      t.skip('delivery mirror test requires dbo.delivery.id to update only the most-recent row safely');
       return;
     }
 
@@ -1330,10 +1512,257 @@ if (!hasRequiredDbEnv) {
 
       const afterRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
       assert.ok(afterRows.length > 0);
-      for (const row of afterRows) {
-        assert.equal(Number(row.qty), 216);
-        assert.equal(Number(row.qty2), 216);
-      }
+
+      // delivery.qty must be unchanged for ALL rows (transaction history preserved).
+      const qtyBefore = beforeRows.map((r) => Number(r.qty));
+      const qtyAfter = afterRows.map((r) => Number(r.qty));
+      assert.deepEqual(qtyAfter, qtyBefore, 'delivery.qty must not be modified');
+
+      // qty2 must be updated to final stock on exactly one row (the most recent).
+      const updatedQty2Rows = afterRows.filter((r) => Number(r.qty2) === 216);
+      assert.equal(
+        updatedQty2Rows.length,
+        1,
+        'exactly one delivery row (the most recent) should have qty2 = final stock'
+      );
+
+      // The most-recent row is the first row in afterRows (ordered by id DESC).
+      assert.equal(
+        Number(afterRows[0].qty2),
+        216,
+        'the most recent delivery row must have qty2 = final stock'
+      );
+    } finally {
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('sp_update_stock_inventory does not overwrite UTILITY-authoritative stock when patched', async (t) => {
+    const pool = await getSqlPool();
+
+    // Check whether the procedure exists and is patched.
+    const checkResult = await pool
+      .request()
+      .input('patchMarker', sql.NVarChar, 'POWERPOS INVENTORY AUTHORITY PATCH')
+      .query(`
+        SELECT
+          CASE WHEN OBJECT_ID(N'dbo.sp_update_stock_inventory', N'P') IS NOT NULL THEN 1 ELSE 0 END AS procExists,
+          CASE WHEN OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P') IS NOT NULL THEN 1 ELSE 0 END AS overrideExists,
+          CASE
+            WHEN OBJECT_ID(N'dbo.sp_update_stock_inventory', N'P') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM sys.sql_modules
+               WHERE object_id = OBJECT_ID(N'dbo.sp_update_stock_inventory', N'P')
+                 AND definition LIKE N'%' + @patchMarker + N'%'
+             ) THEN 1
+            WHEN OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM sys.sql_modules
+               WHERE object_id = OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P')
+                 AND definition LIKE N'%' + @patchMarker + N'%'
+             ) THEN 1
+            ELSE 0
+          END AS isPatchDeployed
+      `);
+
+    const checkRow = checkResult.recordset[0] as Record<string, unknown>;
+    const procExists = Number(checkRow.procExists) === 1;
+    const isPatchDeployed = Number(checkRow.isPatchDeployed) === 1;
+
+    if (!procExists) {
+      t.skip('sp_update_stock_inventory not found; skipping procedure-override test');
+      return;
+    }
+    if (!isPatchDeployed) {
+      t.skip(
+        'Patch not yet deployed. Apply backend/sql/inventory_override/101_patch_sp_update_stock_inventory.sql first.'
+      );
+      return;
+    }
+
+    const cookie = await loginAndGetCookie(ADMIN);
+    await setTestItemQuantity(77);
+
+    const saveResponse = await saveAdjustment(cookie, 3);
+    assert.equal(saveResponse.statusCode, 201);
+    await postAdjustment(cookie, saveResponse.json().data.id);
+
+    const beforeFields = await getItemStockFields(TEST_ITEMCODE);
+    assert.equal(beforeFields.endQty, 80, 'setup: final stock should be 80 before procedure call');
+
+    // Execute sp_update_stock_inventory inside a rollback-safe transaction.
+    const transaction = pool.transaction();
+    await transaction.begin();
+    try {
+      await transaction.request().query('EXEC dbo.sp_update_stock_inventory');
+
+      const afterResult = await transaction
+        .request()
+        .input('itemcode', sql.NVarChar, TEST_ITEMCODE)
+        .query(`
+          SELECT TOP 1
+            ISNULL(CONVERT(DECIMAL(18, 2), end_qty),      0) AS endQty,
+            ISNULL(CONVERT(DECIMAL(18, 2), END_QTY_TEMP), 0) AS endQtyTemp,
+            ISNULL(CONVERT(DECIMAL(18, 2), ASSEMBLY_QTY), 0) AS assemblyQty,
+            ISNULL(CONVERT(DECIMAL(18, 2), assembly_box), 0) AS assemblyBox
+          FROM items
+          WHERE itemcode = @itemcode
+        `);
+
+      const afterRow = afterResult.recordset[0] as Record<string, unknown>;
+      assert.equal(Number(afterRow.endQty), 80, 'end_qty must remain 80 after sp_update_stock_inventory');
+      assert.equal(Number(afterRow.endQtyTemp), 80, 'END_QTY_TEMP must remain 80');
+      assert.equal(Number(afterRow.assemblyQty), 80, 'ASSEMBLY_QTY must remain 80');
+      assert.equal(Number(afterRow.assemblyBox), 80, 'assembly_box must remain 80');
+    } finally {
+      await transaction.rollback();
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('sp_update_assembly does not overwrite UTILITY-authoritative stock when patched', async (t) => {
+    const pool = await getSqlPool();
+
+    const checkResult = await pool
+      .request()
+      .input('patchMarker', sql.NVarChar, 'POWERPOS INVENTORY AUTHORITY PATCH')
+      .query(`
+        SELECT
+          CASE WHEN OBJECT_ID(N'dbo.sp_update_assembly', N'P') IS NOT NULL THEN 1 ELSE 0 END AS procExists,
+          CASE
+            WHEN OBJECT_ID(N'dbo.sp_update_assembly', N'P') IS NOT NULL THEN (
+              SELECT COUNT(*)
+              FROM sys.parameters
+              WHERE object_id = OBJECT_ID(N'dbo.sp_update_assembly', N'P')
+            )
+            ELSE 0
+          END AS paramCount,
+          CASE WHEN OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P') IS NOT NULL THEN 1 ELSE 0 END AS overrideExists,
+          CASE
+            WHEN OBJECT_ID(N'dbo.sp_update_assembly', N'P') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM sys.sql_modules
+               WHERE object_id = OBJECT_ID(N'dbo.sp_update_assembly', N'P')
+                 AND definition LIKE N'%' + @patchMarker + N'%'
+             ) THEN 1
+            WHEN OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM sys.sql_modules
+               WHERE object_id = OBJECT_ID(N'dbo.sp_apply_utility_inventory_override', N'P')
+                 AND definition LIKE N'%' + @patchMarker + N'%'
+             ) THEN 1
+            ELSE 0
+          END AS isPatchDeployed
+      `);
+
+    const checkRow = checkResult.recordset[0] as Record<string, unknown>;
+    const procExists = Number(checkRow.procExists) === 1;
+    const paramCount = Number(checkRow.paramCount ?? 0);
+    const isPatchDeployed = Number(checkRow.isPatchDeployed) === 1;
+
+    if (!procExists) {
+      t.skip('sp_update_assembly not found; skipping procedure-override test');
+      return;
+    }
+    if (paramCount > 0) {
+      t.skip('sp_update_assembly requires parameters on this system; skipping zero-argument authority test');
+      return;
+    }
+    if (!isPatchDeployed) {
+      t.skip(
+        'Patch not yet deployed. Apply backend/sql/inventory_override/103_patch_sp_update_assembly.sql first.'
+      );
+      return;
+    }
+
+    const cookie = await loginAndGetCookie(ADMIN);
+    await setTestItemQuantity(55);
+
+    const saveResponse = await saveAdjustment(cookie, 5);
+    assert.equal(saveResponse.statusCode, 201);
+    await postAdjustment(cookie, saveResponse.json().data.id);
+
+    const beforeFields = await getItemStockFields(TEST_ITEMCODE);
+    assert.equal(beforeFields.endQty, 60, 'setup: final stock should be 60 before procedure call');
+
+    const transaction = pool.transaction();
+    await transaction.begin();
+    try {
+      await transaction.request().query('EXEC dbo.sp_update_assembly');
+
+      const afterResult = await transaction
+        .request()
+        .input('itemcode', sql.NVarChar, TEST_ITEMCODE)
+        .query(`
+          SELECT TOP 1
+            ISNULL(CONVERT(DECIMAL(18, 2), end_qty),      0) AS endQty,
+            ISNULL(CONVERT(DECIMAL(18, 2), END_QTY_TEMP), 0) AS endQtyTemp,
+            ISNULL(CONVERT(DECIMAL(18, 2), ASSEMBLY_QTY), 0) AS assemblyQty,
+            ISNULL(CONVERT(DECIMAL(18, 2), assembly_box), 0) AS assemblyBox
+          FROM items
+          WHERE itemcode = @itemcode
+        `);
+
+      const afterRow = afterResult.recordset[0] as Record<string, unknown>;
+      assert.equal(Number(afterRow.endQty), 60, 'end_qty must remain 60 after sp_update_assembly');
+      assert.equal(Number(afterRow.endQtyTemp), 60, 'END_QTY_TEMP must remain 60');
+      assert.equal(Number(afterRow.assemblyQty), 60, 'ASSEMBLY_QTY must remain 60');
+      assert.equal(Number(afterRow.assemblyBox), 60, 'assembly_box must remain 60');
+    } finally {
+      await transaction.rollback();
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('updates matching delivery qty mirrors to final stock', async (t) => {
+    const support = await getDeliveryMirrorSupport();
+    if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
+      t.skip('delivery mirror test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+    if (!support.hasId) {
+      t.skip('delivery mirror update requires dbo.delivery.id to target one row without touching delivery.qty');
+      return;
+    }
+
+    const beforeRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+    if (beforeRows.length === 0) {
+      t.skip('No matching delivery row for test itemcode');
+      return;
+    }
+
+    try {
+      const cookie = await loginAndGetCookie(ADMIN);
+
+      await setTestItemQuantity(166);
+      await setTestItemLiveFields({ endQty: 166, endQtyTemp: 166, assemblyBox: 10, assemblyQty: 999 });
+
+      const saveResponse = await saveAdjustment(cookie, 50);
+      assert.equal(saveResponse.statusCode, 201);
+      const savedPayload = saveResponse.json();
+
+      const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+      assert.equal(postResponse.statusCode, 200);
+
+      const afterRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+      assert.ok(afterRows.length > 0);
+
+      // delivery.qty is transaction history — it must NOT be overwritten.
+      const qtyBefore = beforeRows.map((r) => Number(r.qty));
+      const qtyAfter = afterRows.map((r) => Number(r.qty));
+      assert.deepEqual(
+        qtyAfter,
+        qtyBefore,
+        'delivery.qty must be unchanged after quantity adjustment (transaction history preserved)'
+      );
+
+      // The most-recent delivery row (first after ordering by id DESC) must
+      // have qty2 updated to the authoritative final stock.
+      assert.equal(
+        Number(afterRows[0].qty2),
+        216,
+        'most-recent delivery row qty2 must equal final stock'
+      );
     } finally {
       await setTestItemQuantity(100);
     }
@@ -1389,6 +1818,10 @@ if (!hasRequiredDbEnv) {
     const support = await getDeliveryMirrorSupport();
     if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
       t.skip('rollback test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+    if (!support.hasId) {
+      t.skip('rollback mirror test requires dbo.delivery.id because mirror updates are skipped otherwise');
       return;
     }
 

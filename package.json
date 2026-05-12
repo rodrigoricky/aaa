@@ -14,6 +14,10 @@
     "db:invadj:merge:dry": "npm run db:invadj:merge:dry --prefix backend",
     "demo:on": "npm run demo:on --prefix backend",
     "demo:off": "npm run demo:off --prefix backend",
+    "db:inventory:authority-check": "npm run db:inventory:authority-check --prefix backend",
+    "db:inventory:authority-check:dry": "npm run db:inventory:authority-check:dry --prefix backend",
+    "db:inventory:authority-apply": "npm run db:inventory:authority-apply --prefix backend --",
+    "db:inventory:authority-apply:dry": "npm run db:inventory:authority-apply:dry --prefix backend",
     "test:backend": "npm run test --prefix backend",
     "reset:qa": "cd backend && node --import tsx src/scripts/reset-qa.ts",
     "diagnose:qa": "cd backend && node --import tsx src/scripts/diagnose-qa.ts"

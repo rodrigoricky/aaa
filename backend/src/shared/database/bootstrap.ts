@@ -1,11 +1,23 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { env } from '../../config/env.js';
 import { getSqlPool, sql } from './sql-server.js';
 import { hashPassword } from '../utils/password.js';
 
 async function resolveSqlScriptPaths() {
-  const sqlDir = path.resolve(process.cwd(), 'sql');
+  const candidateDirs = [
+    path.resolve(process.cwd(), 'sql'),
+    path.resolve(process.cwd(), 'backend', 'sql'),
+  ];
+  const sqlDir = candidateDirs.find((candidate) => existsSync(candidate));
+
+  if (!sqlDir) {
+    throw new Error(
+      `Could not find backend SQL bootstrap directory. Checked: ${candidateDirs.join(', ')}`
+    );
+  }
+
   const entries = await readdir(sqlDir);
   return entries
     .filter((entry) => /^\d+_.+\.sql$/i.test(entry))

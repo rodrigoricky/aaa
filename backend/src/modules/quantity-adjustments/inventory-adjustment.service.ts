@@ -245,6 +245,13 @@ export async function adjustInventory(
     throw unprocessable(`Unable to update inventory quantity for item ${item.itemcode}`);
   }
 
+  // POWERPOS INVENTORY AUTHORITY PATCH
+  // delivery.qty is transaction history consumed by SUM(delivery.qty) inside
+  // sp_update_stock_inventory and related legacy procedures.  Overwriting ALL
+  // rows corrupts the historical ledger formula and causes those procedures to
+  // recompute a wrong stock value that then overwrites the authoritative QA
+  // stock.  Only qty2 (a display-mirror column) is updated, and only for the
+  // single most-recent delivery row so that the legacy formula is preserved.
   await transaction
     .request()
     .input('itemcode', sql.NVarChar, item.itemcode)
@@ -252,14 +259,55 @@ export async function adjustInventory(
     .query(`
       IF OBJECT_ID(N'dbo.delivery', N'U') IS NOT NULL
          AND COL_LENGTH(N'dbo.delivery', N'itemcode') IS NOT NULL
-         AND COL_LENGTH(N'dbo.delivery', N'qty') IS NOT NULL
          AND COL_LENGTH(N'dbo.delivery', N'qty2') IS NOT NULL
       BEGIN
-        UPDATE dbo.delivery
-        SET
-          qty = @finalStock,
-          qty2 = @finalStock
-        WHERE itemcode = @itemcode;
+        DECLARE @mirrorSql NVARCHAR(MAX) = NULL;
+
+        -- Use id + delivery_date to identify the most-recent row when both
+        -- columns are available; fall back to id alone when delivery_date is
+        -- absent. Dynamic SQL prevents SQL Server from compiling id-based
+        -- references on legacy delivery tables that do not have that column.
+        IF COL_LENGTH(N'dbo.delivery', N'id') IS NOT NULL
+           AND COL_LENGTH(N'dbo.delivery', N'delivery_date') IS NOT NULL
+        BEGIN
+          SET @mirrorSql = N'
+            UPDATE d
+            SET d.qty2 = @finalStock
+            FROM dbo.delivery d
+            INNER JOIN (
+              SELECT TOP (1) id
+              FROM dbo.delivery
+              WHERE itemcode = @itemcode
+              ORDER BY delivery_date DESC, id DESC
+            ) latest ON d.id = latest.id;
+          ';
+        END
+        ELSE IF COL_LENGTH(N'dbo.delivery', N'id') IS NOT NULL
+        BEGIN
+          SET @mirrorSql = N'
+            UPDATE d
+            SET d.qty2 = @finalStock
+            FROM dbo.delivery d
+            INNER JOIN (
+              SELECT TOP (1) id
+              FROM dbo.delivery
+              WHERE itemcode = @itemcode
+              ORDER BY id DESC
+            ) latest ON d.id = latest.id;
+          ';
+        END
+
+        IF @mirrorSql IS NOT NULL
+        BEGIN
+          EXEC sp_executesql
+            @mirrorSql,
+            N'@itemcode NVARCHAR(100), @finalStock DECIMAL(18, 2)',
+            @itemcode = @itemcode,
+            @finalStock = @finalStock;
+        END
+
+        -- If no usable key column exists the update is skipped entirely to
+        -- prevent any possibility of corrupting transaction history rows.
       END
     `);
 

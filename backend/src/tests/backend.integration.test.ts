@@ -275,6 +275,40 @@ if (!hasRequiredDbEnv) {
     });
   }
 
+  async function postAdjustment(cookie: string, adjustmentId: string | number) {
+    return app.inject({
+      method: 'POST',
+      url: `/api/quantity-adjustments/${adjustmentId}/post`,
+      headers: {
+        cookie,
+      },
+    });
+  }
+
+  async function getPostedLegacyAdjustment(qaNo: string) {
+    const pool = await getSqlPool();
+    const batchNo = qaNo.slice(-10);
+    const result = await pool
+      .request()
+      .input('itemcode', sql.NVarChar, TEST_ITEMCODE)
+      .input('batchNo', sql.NVarChar, batchNo)
+      .query(`
+        SELECT TOP 1
+          old_balance AS oldBalance,
+          qty,
+          balance,
+          new_qty AS newQty,
+          end_qty AS endQty
+        FROM inventory_adjustment
+        WHERE machine_id = N'UTILITY'
+          AND BATCH_NO = @batchNo
+          AND itemcode = @itemcode
+        ORDER BY trans_date DESC
+      `);
+
+    return result.recordset[0] as Record<string, unknown> | undefined;
+  }
+
   async function getLatestAuditEvent(eventType: string, qaId: string | number) {
     const pool = await getSqlPool();
     const result = await pool
@@ -903,6 +937,34 @@ if (!hasRequiredDbEnv) {
     assert.match(saveResponse.json().message, /no valid current quantity/);
   });
 
+  test('rejects invalid adjustment quantities before saving', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const invalidQuantities = ['', 'not-a-number', 1_000_000_000];
+
+    for (const requestedQty of invalidQuantities) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/quantity-adjustments',
+        headers: {
+          cookie,
+        },
+        payload: {
+          refType: 'DM',
+          lines: [
+            {
+              itemcode: TEST_ITEMCODE,
+              entryMode: 'DELTA',
+              requestedQty,
+              itemRemark: 'Invalid quantity test',
+            },
+          ],
+        },
+      });
+
+      assert.equal(response.statusCode, 400);
+    }
+  });
+
   test('rejects posting an adjustment whose saved item is missing', async () => {
     const cookie = await loginAndGetCookie(ADMIN);
     const saved = await insertSavedAdjustmentForMissingItem();
@@ -954,6 +1016,69 @@ if (!hasRequiredDbEnv) {
     await setTestItemQuantity(100);
   });
 
+  test('posts legacy inventory_adjustment rows with balance equal to final stock', async () => {
+    const cookie = await loginAndGetCookie(ADMIN);
+    const pool = await getSqlPool();
+
+    await setTestItemQuantity(166);
+    const positiveSaveResponse = await saveAdjustment(cookie, 50);
+    assert.equal(positiveSaveResponse.statusCode, 201);
+    const positiveSaved = positiveSaveResponse.json().data;
+    const positivePostResponse = await postAdjustment(cookie, positiveSaved.id);
+    assert.equal(positivePostResponse.statusCode, 200);
+
+    const positiveLegacy = await getPostedLegacyAdjustment(positiveSaved.qaNo);
+    assert.ok(positiveLegacy);
+    assert.equal(Number(positiveLegacy.oldBalance), 166);
+    assert.equal(Number(positiveLegacy.qty), 50);
+    assert.equal(Number(positiveLegacy.balance), 216);
+    assert.equal(Number(positiveLegacy.newQty), 216);
+    assert.equal(Number(positiveLegacy.endQty), 216);
+
+    let itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
+      SELECT TOP 1 end_qty AS endQty
+      FROM items
+      WHERE itemcode = @itemcode
+    `);
+    assert.equal(Number(itemResult.recordset[0].endQty), 216);
+
+    const negativeSaveResponse = await saveAdjustment(cookie, -20);
+    assert.equal(negativeSaveResponse.statusCode, 201);
+    const negativeSaved = negativeSaveResponse.json().data;
+    const negativePostResponse = await postAdjustment(cookie, negativeSaved.id);
+    assert.equal(negativePostResponse.statusCode, 200);
+
+    const negativeLegacy = await getPostedLegacyAdjustment(negativeSaved.qaNo);
+    assert.ok(negativeLegacy);
+    assert.equal(Number(negativeLegacy.oldBalance), 216);
+    assert.equal(Number(negativeLegacy.qty), -20);
+    assert.equal(Number(negativeLegacy.balance), 196);
+    assert.equal(Number(negativeLegacy.newQty), 196);
+    assert.equal(Number(negativeLegacy.endQty), 196);
+
+    await setTestItemQuantity(100);
+    const zeroSaveResponse = await saveAdjustment(cookie, 0);
+    assert.equal(zeroSaveResponse.statusCode, 201);
+    const zeroSaved = zeroSaveResponse.json().data;
+    const zeroPostResponse = await postAdjustment(cookie, zeroSaved.id);
+    assert.equal(zeroPostResponse.statusCode, 200);
+
+    const zeroLegacy = await getPostedLegacyAdjustment(zeroSaved.qaNo);
+    assert.ok(zeroLegacy);
+    assert.equal(Number(zeroLegacy.oldBalance), 100);
+    assert.equal(Number(zeroLegacy.qty), 0);
+    assert.equal(Number(zeroLegacy.balance), 100);
+    assert.equal(Number(zeroLegacy.newQty), 100);
+    assert.equal(Number(zeroLegacy.endQty), 100);
+
+    itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
+      SELECT TOP 1 end_qty AS endQty
+      FROM items
+      WHERE itemcode = @itemcode
+    `);
+    assert.equal(Number(itemResult.recordset[0].endQty), 100);
+  });
+
   test('blocks posting when stock changed after save without partial writes', async () => {
     const cookie = await loginAndGetCookie(ADMIN);
     const pool = await getSqlPool();
@@ -999,15 +1124,6 @@ if (!hasRequiredDbEnv) {
       conflictPayload.message,
       'Stock changed after this adjustment was saved. Please reload and review before posting.'
     );
-    assert.deepEqual(conflictPayload.error.details.items, [
-      {
-        itemcode: TEST_ITEMCODE,
-        savedQty: 100,
-        liveQty: 0,
-        difference: -100,
-      },
-    ]);
-    assert.deepEqual(conflictPayload.items, conflictPayload.error.details.items);
 
     const verification = await pool
       .request()

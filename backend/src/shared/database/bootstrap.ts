@@ -1,11 +1,16 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from '../../config/env.js';
 import { getSqlPool, sql } from './sql-server.js';
 import { hashPassword } from '../utils/password.js';
 
-function resolveSqlScriptPath() {
-  return path.resolve(process.cwd(), 'sql', '001_init_utility_schema.sql');
+async function resolveSqlScriptPaths() {
+  const sqlDir = path.resolve(process.cwd(), 'sql');
+  const entries = await readdir(sqlDir);
+  return entries
+    .filter((entry) => /^\d+_.+\.sql$/i.test(entry))
+    .sort((left, right) => left.localeCompare(right))
+    .map((entry) => path.join(sqlDir, entry));
 }
 
 function getSchemaScript(script: string) {
@@ -25,12 +30,16 @@ export async function ensureUtilitySchema() {
   }
 
   const pool = await getSqlPool();
-  const rawScript = await readFile(resolveSqlScriptPath(), 'utf8');
-  const script = getSchemaScript(rawScript);
-  const batches = splitBatches(script);
+  const scriptPaths = await resolveSqlScriptPaths();
 
-  for (const batch of batches) {
-    await pool.request().batch(batch);
+  for (const scriptPath of scriptPaths) {
+    const rawScript = await readFile(scriptPath, 'utf8');
+    const script = getSchemaScript(rawScript);
+    const batches = splitBatches(script);
+
+    for (const batch of batches) {
+      await pool.request().batch(batch);
+    }
   }
 
   await ensureNumberingRows();

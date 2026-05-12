@@ -1,12 +1,27 @@
 import { z } from 'zod';
+import { MAX_ABSOLUTE_ADJUSTMENT_QTY } from './inventory-adjustment-calculator.js';
 
 const MAX_QA_LINES = 8;
 const MAX_QA_LINES_MESSAGE = 'Maximum of 8 items per Quantity Adjustment.';
+const quantityInputSchema = z.preprocess(
+  (value) => {
+    if (value === null || value === undefined) return Number.NaN;
+    if (typeof value === 'string' && value.trim() === '') return Number.NaN;
+    return value;
+  },
+  z.coerce
+    .number()
+    .finite('Quantity must be a valid number')
+    .refine(
+      (value) => Math.abs(value) <= MAX_ABSOLUTE_ADJUSTMENT_QTY,
+      'Quantity is too large'
+    )
+);
 
 const lineSchema = z.object({
   itemcode: z.string().trim().min(1).max(50),
   entryMode: z.enum(['DELTA', 'SET']).default('DELTA'),
-  requestedQty: z.coerce.number().finite(),
+  requestedQty: quantityInputSchema,
   itemRemark: z.string().trim().max(500).optional(),
 });
 

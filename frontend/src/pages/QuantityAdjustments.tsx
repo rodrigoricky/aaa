@@ -54,6 +54,7 @@ interface StaleStockConflict {
 
 const MAX_QA_LINES = 8;
 const MAX_QA_LINES_MESSAGE = 'Maximum of 8 items per Quantity Adjustment.';
+const MAX_ABSOLUTE_ADJUSTMENT_QTY = 999_999_999;
 
 function createRowId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -112,7 +113,7 @@ function computePreview(line: DraftLine): { adjustQty: number | null; newQty: nu
 
   if (line.entryMode === 'DELTA') {
     const delta = Number(raw);
-    if (!Number.isFinite(delta) || delta === 0) return { adjustQty: null, newQty: null };
+    if (!Number.isFinite(delta)) return { adjustQty: null, newQty: null };
     return { adjustQty: delta, newQty: line.oldQty + delta };
   } else {
     const target = Number(raw);
@@ -141,11 +142,12 @@ function buildValidation(lines: DraftLine[]): ValidationErrors {
     } else if (line.entryMode === 'DELTA') {
       const delta = Number(raw);
       if (!Number.isFinite(delta)) rowErrors.adjustQty = 'Enter a number (e.g. +5 or -4)';
-      else if (delta === 0) rowErrors.adjustQty = 'Cannot be zero';
+      else if (Math.abs(delta) > MAX_ABSOLUTE_ADJUSTMENT_QTY) rowErrors.adjustQty = 'Too large';
     } else {
       const target = Number(raw);
       if (!Number.isFinite(target)) rowErrors.adjustQty = 'Enter a valid quantity (e.g. 10)';
       else if (target < 0) rowErrors.adjustQty = 'Cannot be negative';
+      else if (target > MAX_ABSOLUTE_ADJUSTMENT_QTY) rowErrors.adjustQty = 'Too large';
     }
 
     if (line.itemComment.length > 500) {
@@ -759,10 +761,10 @@ export default function QuantityAdjustments() {
               <tr>
                 <th>Barcode / Item</th>
                 <th>Description</th>
-                <th>Current Qty</th>
+                <th>Current Stock</th>
                 <th>Mode</th>
-                <th>Input</th>
-                <th>New Qty</th>
+                <th>Adjustment Qty</th>
+                <th>Final Stock</th>
                 <th>Comment</th>
                 {isEditable && <th></th>}
               </tr>
@@ -790,7 +792,7 @@ export default function QuantityAdjustments() {
                             className={styles.modeSelect}
                             value={line.entryMode}
                             onChange={(e) => updateLine(line.rowId, 'entryMode', e.target.value)}
-                            title="Adjust (+/−) adds or subtracts from current qty. Set exact replaces it."
+                            title="Adjust adds to or subtracts from current stock. Set exact replaces it."
                           >
                             <option value="DELTA">Adjust (+/−)</option>
                             <option value="SET">Set exact qty</option>
@@ -807,9 +809,9 @@ export default function QuantityAdjustments() {
                             <input
                               className={`${styles.cellInput} ${rowErrors?.adjustQty ? styles.cellInputError : ''}`}
                               type="text"
-                              inputMode="numeric"
+                              inputMode="decimal"
                               value={line.inputValue}
-                              placeholder={line.entryMode === 'DELTA' ? 'e.g. +5 or −4' : 'e.g. 10'}
+                              placeholder={line.entryMode === 'DELTA' ? 'e.g. +5, 0, or -4' : 'e.g. 10'}
                               onChange={(e) => updateLine(line.rowId, 'inputValue', e.target.value)}
                             />
                             {rowErrors?.adjustQty && (

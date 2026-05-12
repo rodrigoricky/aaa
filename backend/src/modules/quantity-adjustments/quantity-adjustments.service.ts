@@ -26,6 +26,11 @@ import {
   generateNextQaNumberInTransaction,
   getNumberingPreview,
 } from '../numbering/numbering.service.js';
+import {
+  calculateInventoryAdjustment,
+  normalizeAdjustmentQty,
+} from './inventory-adjustment-calculator.js';
+import { adjustInventory } from './inventory-adjustment.service.js';
 
 interface AdjustmentLineInput {
   itemcode: string;
@@ -493,12 +498,12 @@ async function replaceDetails(
       if (!Number.isFinite(newQty) || newQty < 0) {
         throw badRequest(`Invalid target quantity for item ${line.itemcode}`);
       }
+      const calculation = calculateInventoryAdjustment(item.quantity, adjustQty, line.itemcode);
+      adjustQty = calculation.adjustmentQty;
+      newQty = calculation.finalStock;
     } else {
-      adjustQty = line.requestedQty;
-      newQty = item.quantity + adjustQty;
-      if (adjustQty === 0) {
-        throw badRequest(`Adjustment quantity cannot be zero for item ${line.itemcode}`);
-      }
+      adjustQty = normalizeAdjustmentQty(line.requestedQty, line.itemcode);
+      newQty = calculateInventoryAdjustment(item.quantity, adjustQty, line.itemcode).finalStock;
     }
 
     await transaction
@@ -780,22 +785,28 @@ export async function postQuantityAdjustment(qaId: number, actor: AuthenticatedU
       let inventoryRowsInserted = 0;
 
       for (const detail of details) {
-        const currentItem = itemRows.get(detail.itemcode) as ItemSnapshotRow;
-        const currentQty = currentItem.quantity;
-        const newQty =
-          detail.entryMode === 'SET'
-            ? detail.requestedQty
-            : currentQty + detail.adjustQty;
         const legacyUserId = (actor.legacyUserId ?? actor.username).slice(0, 10);
         const legacyRefNo = `${header.refType}-${header.refNo}`.slice(0, 10);
         const visibleQaNo = cleanString(qaNumber.value);
         const legacyBatchNo = visibleQaNo.slice(-10);
 
+        const postedAdjustment = await adjustInventory(transaction, {
+          itemcode: detail.itemcode,
+          itemname: detail.itemname,
+          adjustmentQty: detail.adjustQty,
+          transDate: header.transDate,
+          remarks: detail.itemRemark,
+          legacyUserId,
+          legacyRefNo,
+          legacyBatchNo,
+          modifiedBy: actor.username.slice(0, 12),
+        });
+
         await transaction
           .request()
           .input('detailId', sql.BigInt, Number(detail.id))
-          .input('postedOldQty', sql.Decimal(18, 2), currentQty)
-          .input('postedNewQty', sql.Decimal(18, 2), newQty)
+          .input('postedOldQty', sql.Decimal(18, 2), postedAdjustment.oldBalance)
+          .input('postedNewQty', sql.Decimal(18, 2), postedAdjustment.finalStock)
           .query(`
             UPDATE [${env.UTILITY_SCHEMA}].[qa_detail]
             SET
@@ -804,75 +815,6 @@ export async function postQuantityAdjustment(qaId: number, actor: AuthenticatedU
               new_qty = @postedNewQty,
               updated_at = SYSUTCDATETIME()
             WHERE detail_id = @detailId
-          `);
-
-        await transaction
-          .request()
-          .input('itemcode', sql.NVarChar, detail.itemcode)
-          .input('newQty', sql.Decimal(18, 2), newQty)
-          .input('adjustQty', sql.Decimal(18, 2), detail.adjustQty)
-          .input('modifiedBy', sql.NVarChar, actor.username.slice(0, 12))
-          .query(`
-            UPDATE items
-            SET
-              end_qty = @newQty,
-              END_QTY_TEMP = @newQty,
-              ASSEMBLY_QTY = @newQty,
-              adjustment = ISNULL(adjustment, 0) + @adjustQty,
-              modified_by = @modifiedBy,
-              date_modified = GETDATE()
-            WHERE itemcode = @itemcode
-          `);
-
-        await transaction
-          .request()
-          .input('transDate', sql.DateTime, header.transDate)
-          .input('qty', sql.Decimal(18, 2), detail.adjustQty)
-          .input('userid', sql.Char(10), legacyUserId)
-          .input('posted', sql.Numeric(18, 0), 1)
-          .input('remarks', sql.NVarChar, detail.itemRemark?.slice(0, 50) ?? null)
-          .input('endQty', sql.Decimal(18, 2), newQty)
-          .input('balance', sql.Decimal(18, 2), currentQty)
-          .input('newQty', sql.Decimal(18, 2), newQty)
-          .input('itemname', sql.NVarChar, detail.itemname)
-          .input('machineId', sql.NVarChar, 'UTILITY')
-          .input('sync', sql.TinyInt, 0)
-          .input('batchNo', sql.NVarChar, legacyBatchNo)
-          .input('refNo', sql.Char(10), legacyRefNo)
-          .input('itemcode', sql.NVarChar, detail.itemcode)
-          .query(`
-            INSERT INTO inventory_adjustment (
-              trans_date,
-              qty,
-              userid,
-              posted,
-              remarks,
-              end_qty,
-              balance,
-              new_qty,
-              itemname,
-              machine_id,
-              sync,
-              BATCH_NO,
-              ref_no,
-              itemcode
-            )
-            VALUES (
-              @transDate,
-              @qty,
-              @userid,
-              @posted,
-              @remarks,
-              @endQty,
-              @balance,
-              @newQty,
-              @itemname,
-              @machineId,
-              @sync,
-              @batchNo,
-              @refNo,
-              @itemcode
-            )
           `);
 
         inventoryRowsInserted += 1;

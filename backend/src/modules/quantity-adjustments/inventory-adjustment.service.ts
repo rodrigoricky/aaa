@@ -140,9 +140,14 @@ export async function adjustInventory(
     .query(`
       UPDATE items
       SET
+        -- Legacy POS stock mirrors:
+        -- Old POS screens read multiple item/delivery quantity columns.
+        -- Keep these mirrors synchronized to finalStock after quantity adjustment.
+        -- Update both ASSEMBLY_QTY and assembly_box as required legacy columns.
         end_qty = @finalStock,
         END_QTY_TEMP = @finalStock,
         ASSEMBLY_QTY = @finalStock,
+        assembly_box = @finalStock,
         adjustment = ISNULL(adjustment, 0) + @adjustmentQty,
         modified_by = @modifiedBy,
         date_modified = GETDATE()
@@ -152,6 +157,22 @@ export async function adjustInventory(
   if ((updateResult.rowsAffected[0] ?? 0) !== 1) {
     throw unprocessable(`Unable to update inventory quantity for item ${item.itemcode}`);
   }
+
+  await transaction
+    .request()
+    .input('itemcode', sql.NVarChar, item.itemcode)
+    .input('finalStock', sql.Decimal(18, 2), finalStock)
+    .query(`
+      IF OBJECT_ID(N'dbo.delivery', N'U') IS NOT NULL
+         AND COL_LENGTH(N'dbo.delivery', N'itemcode') IS NOT NULL
+      BEGIN
+        UPDATE dbo.delivery
+        SET
+          qty = @finalStock,
+          qty2 = @finalStock
+        WHERE itemcode = @itemcode;
+      END
+    `);
 
   return calculation;
 }

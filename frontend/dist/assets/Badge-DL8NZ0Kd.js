@@ -1,0 +1,1 @@
+import{J as e}from"./vendor-Bj3SGaWR.js";const t="_badge_1d8up_1",_="_success_1d8up_13",r="_warning_1d8up_18",u="_danger_1d8up_23",c="_info_1d8up_28",o="_neutral_1d8up_33",n={badge:t,success:_,warning:r,danger:u,info:c,neutral:o};function g({variant:s="neutral",children:a}){return e.jsx("span",{className:`${n.badge} ${n[s]}`,children:a})}export{g as B};

@@ -34,6 +34,7 @@ if (!hasRequiredDbEnv) {
   let originalItemState: {
     quantity: number;
     tempQuantity: number;
+    assemblyBox: number;
     assemblyQuantity: number;
     adjustment: number;
   };
@@ -227,6 +228,7 @@ if (!hasRequiredDbEnv) {
         SET
           end_qty = @quantity,
           END_QTY_TEMP = @quantity,
+          assembly_box = @quantity,
           ASSEMBLY_QTY = @quantity
         WHERE itemcode = @itemcode
       `);
@@ -235,6 +237,7 @@ if (!hasRequiredDbEnv) {
   async function setTestItemLiveFields(input: {
     endQty: number | null;
     endQtyTemp?: number;
+    assemblyBox?: number;
     assemblyQty?: number;
   }) {
     const pool = await getSqlPool();
@@ -243,12 +246,14 @@ if (!hasRequiredDbEnv) {
       .input('itemcode', TEST_ITEMCODE)
       .input('endQty', sql.Decimal(18, 2), input.endQty)
       .input('endQtyTemp', sql.Decimal(18, 2), input.endQtyTemp ?? null)
+      .input('assemblyBox', sql.Decimal(18, 2), input.assemblyBox ?? null)
       .input('assemblyQty', sql.Decimal(18, 2), input.assemblyQty ?? null)
       .query(`
         UPDATE items
         SET
           end_qty = @endQty,
           END_QTY_TEMP = COALESCE(@endQtyTemp, END_QTY_TEMP),
+          assembly_box = COALESCE(@assemblyBox, assembly_box),
           ASSEMBLY_QTY = COALESCE(@assemblyQty, ASSEMBLY_QTY)
         WHERE itemcode = @itemcode
       `);
@@ -326,6 +331,48 @@ if (!hasRequiredDbEnv) {
       `);
 
     return result.recordset[0] ?? null;
+  }
+
+  interface DeliveryMirrorSupport {
+    hasDeliveryTable: boolean;
+    hasItemcode: boolean;
+    hasQty: boolean;
+    hasQty2: boolean;
+  }
+
+  async function getDeliveryMirrorSupport(): Promise<DeliveryMirrorSupport> {
+    const pool = await getSqlPool();
+    const result = await pool.request().query(`
+      SELECT
+        CASE WHEN OBJECT_ID(N'dbo.delivery', N'U') IS NOT NULL THEN 1 ELSE 0 END AS hasDeliveryTable,
+        CASE WHEN COL_LENGTH(N'dbo.delivery', N'itemcode') IS NOT NULL THEN 1 ELSE 0 END AS hasItemcode,
+        CASE WHEN COL_LENGTH(N'dbo.delivery', N'qty') IS NOT NULL THEN 1 ELSE 0 END AS hasQty,
+        CASE WHEN COL_LENGTH(N'dbo.delivery', N'qty2') IS NOT NULL THEN 1 ELSE 0 END AS hasQty2
+    `);
+
+    const row = result.recordset[0] as Record<string, unknown>;
+    return {
+      hasDeliveryTable: Number(row.hasDeliveryTable) === 1,
+      hasItemcode: Number(row.hasItemcode) === 1,
+      hasQty: Number(row.hasQty) === 1,
+      hasQty2: Number(row.hasQty2) === 1,
+    };
+  }
+
+  async function getDeliveryMirrorRows(itemcode: string) {
+    const pool = await getSqlPool();
+    const result = await pool
+      .request()
+      .input('itemcode', sql.NVarChar, itemcode)
+      .query(`
+        SELECT
+          qty,
+          qty2
+        FROM dbo.delivery
+        WHERE itemcode = @itemcode
+      `);
+
+    return result.recordset as Array<Record<string, unknown>>;
   }
 
   async function insertSavedAdjustmentForMissingItem() {
@@ -441,6 +488,7 @@ if (!hasRequiredDbEnv) {
       SELECT TOP 1
         end_qty AS endQty,
         END_QTY_TEMP AS endQtyTemp,
+        assembly_box AS assemblyBox,
         ASSEMBLY_QTY AS assemblyQty,
         adjustment
       FROM items
@@ -458,6 +506,7 @@ if (!hasRequiredDbEnv) {
     originalItemState = {
       quantity: Number(itemResult.recordset[0].endQty ?? 0),
       tempQuantity: Number(itemResult.recordset[0].endQtyTemp ?? 0),
+      assemblyBox: Number(itemResult.recordset[0].assemblyBox ?? 0),
       assemblyQuantity: Number(itemResult.recordset[0].assemblyQty ?? 0),
       adjustment: Number(itemResult.recordset[0].adjustment ?? 0),
     };
@@ -478,6 +527,7 @@ if (!hasRequiredDbEnv) {
       .input('itemcode', TEST_ITEMCODE)
       .input('endQty', sql.Decimal(18, 2), originalItemState.quantity)
       .input('endQtyTemp', sql.Decimal(18, 2), originalItemState.tempQuantity)
+      .input('assemblyBox', sql.Decimal(18, 2), originalItemState.assemblyBox)
       .input('assemblyQty', sql.Decimal(18, 2), originalItemState.assemblyQuantity)
       .input('adjustment', sql.Decimal(18, 2), originalItemState.adjustment)
       .input('qaNextValue', sql.BigInt, originalQaNumbering.nextValue)
@@ -487,6 +537,7 @@ if (!hasRequiredDbEnv) {
         SET
           end_qty = @endQty,
           END_QTY_TEMP = @endQtyTemp,
+          assembly_box = @assemblyBox,
           ASSEMBLY_QTY = @assemblyQty,
           adjustment = @adjustment
         WHERE itemcode = @itemcode
@@ -1179,7 +1230,16 @@ if (!hasRequiredDbEnv) {
     const cookie = await loginAndGetCookie(ADMIN);
     const pool = await getSqlPool();
 
+    const beforeItemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
+      SELECT TOP 1
+        itemname
+      FROM items
+      WHERE itemcode = @itemcode
+    `);
+    const beforeItemname = String(beforeItemResult.recordset[0].itemname ?? '');
+
     await setTestItemQuantity(100);
+    await setTestItemLiveFields({ endQty: 100, endQtyTemp: 100, assemblyBox: 321, assemblyQty: 999 });
     const saveResponse = await saveAdjustment(cookie, -4);
     assert.equal(saveResponse.statusCode, 201);
     const savedPayload = saveResponse.json();
@@ -1201,18 +1261,198 @@ if (!hasRequiredDbEnv) {
 
     const itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
       SELECT TOP 1
+        itemname,
         end_qty AS endQty,
         END_QTY_TEMP AS endQtyTemp,
+        assembly_box AS assemblyBox,
         ASSEMBLY_QTY AS assemblyQty
       FROM items
       WHERE itemcode = @itemcode
     `);
 
+    assert.equal(String(itemResult.recordset[0].itemname ?? ''), beforeItemname);
     assert.equal(Number(itemResult.recordset[0].endQty), 96);
     assert.equal(Number(itemResult.recordset[0].endQtyTemp), 96);
+    assert.equal(Number(itemResult.recordset[0].assemblyBox), 96);
     assert.equal(Number(itemResult.recordset[0].assemblyQty), 96);
 
     await setTestItemQuantity(100);
+  });
+
+  test('updates matching delivery qty mirrors to final stock', async (t) => {
+    const support = await getDeliveryMirrorSupport();
+    if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
+      t.skip('delivery mirror test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+
+    const beforeRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+    if (beforeRows.length === 0) {
+      t.skip('No matching delivery row for test itemcode');
+      return;
+    }
+
+    try {
+      const cookie = await loginAndGetCookie(ADMIN);
+
+      await setTestItemQuantity(166);
+      await setTestItemLiveFields({ endQty: 166, endQtyTemp: 166, assemblyBox: 10, assemblyQty: 999 });
+
+      const saveResponse = await saveAdjustment(cookie, 50);
+      assert.equal(saveResponse.statusCode, 201);
+      const savedPayload = saveResponse.json();
+
+      const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+      assert.equal(postResponse.statusCode, 200);
+
+      const afterRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+      assert.ok(afterRows.length > 0);
+      for (const row of afterRows) {
+        assert.equal(Number(row.qty), 216);
+        assert.equal(Number(row.qty2), 216);
+      }
+    } finally {
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('succeeds when no matching delivery row exists', async (t) => {
+    const support = await getDeliveryMirrorSupport();
+    if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
+      t.skip('delivery mirror test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+
+    const existingRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+    if (existingRows.length > 0) {
+      t.skip('Test requires itemcode with no delivery rows; existing rows found for test item');
+      return;
+    }
+
+    try {
+      const cookie = await loginAndGetCookie(ADMIN);
+      const pool = await getSqlPool();
+
+      await setTestItemQuantity(166);
+      await setTestItemLiveFields({ endQty: 166, endQtyTemp: 166, assemblyBox: 1, assemblyQty: 999 });
+
+      const saveResponse = await saveAdjustment(cookie, 50);
+      assert.equal(saveResponse.statusCode, 201);
+      const savedPayload = saveResponse.json();
+
+      const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+      assert.equal(postResponse.statusCode, 200);
+
+      const itemResult = await pool.request().input('itemcode', TEST_ITEMCODE).query(`
+        SELECT TOP 1
+          end_qty AS endQty,
+          END_QTY_TEMP AS endQtyTemp,
+          assembly_box AS assemblyBox,
+          ASSEMBLY_QTY AS assemblyQty
+        FROM items
+        WHERE itemcode = @itemcode
+      `);
+
+      assert.equal(Number(itemResult.recordset[0].endQty), 216);
+      assert.equal(Number(itemResult.recordset[0].endQtyTemp), 216);
+      assert.equal(Number(itemResult.recordset[0].assemblyBox), 216);
+      assert.equal(Number(itemResult.recordset[0].assemblyQty), 216);
+    } finally {
+      await setTestItemQuantity(100);
+    }
+  });
+
+  test('rolls back posting when delivery mirror update fails', async (t) => {
+    const support = await getDeliveryMirrorSupport();
+    if (!support.hasDeliveryTable || !support.hasItemcode || !support.hasQty || !support.hasQty2) {
+      t.skip('rollback test requires dbo.delivery(itemcode, qty, qty2)');
+      return;
+    }
+
+    const deliveryRows = await getDeliveryMirrorRows(TEST_ITEMCODE);
+    if (deliveryRows.length === 0) {
+      t.skip('Rollback test requires a matching delivery row for the test item');
+      return;
+    }
+
+    const cookie = await loginAndGetCookie(ADMIN);
+    const pool = await getSqlPool();
+    const triggerName = 'trg_qa_test_delivery_fail';
+
+    await setTestItemQuantity(166);
+    await setTestItemLiveFields({ endQty: 166, endQtyTemp: 166, assemblyBox: 10, assemblyQty: 999 });
+
+    const saveResponse = await saveAdjustment(cookie, 50);
+    assert.equal(saveResponse.statusCode, 201);
+    const savedPayload = saveResponse.json();
+    const batchNo = String(savedPayload.data.qaNo).slice(-10);
+
+    await pool.request().query(`
+      IF OBJECT_ID(N'dbo.${triggerName}', N'TR') IS NOT NULL
+      BEGIN
+        DROP TRIGGER dbo.${triggerName};
+      END
+    `);
+
+    try {
+      await pool.request().query(`
+        CREATE TRIGGER dbo.${triggerName}
+        ON dbo.delivery
+        AFTER UPDATE
+        AS
+        BEGIN
+          SET NOCOUNT ON;
+          IF EXISTS (SELECT 1 FROM inserted WHERE itemcode = N'${TEST_ITEMCODE}')
+          BEGIN
+            THROW 51000, 'Simulated delivery mirror failure', 1;
+          END
+        END
+      `);
+
+      const postResponse = await postAdjustment(cookie, savedPayload.data.id);
+      assert.equal(postResponse.statusCode, 500);
+
+      const verification = await pool
+        .request()
+        .input('itemcode', sql.NVarChar, TEST_ITEMCODE)
+        .input('qaId', sql.BigInt, Number(savedPayload.data.id))
+        .input('batchNo', sql.NVarChar, batchNo)
+        .query(`
+          SELECT TOP 1
+            end_qty AS endQty,
+            END_QTY_TEMP AS endQtyTemp,
+            assembly_box AS assemblyBox,
+            ASSEMBLY_QTY AS assemblyQty
+          FROM items
+          WHERE itemcode = @itemcode;
+
+          SELECT TOP 1
+            status
+          FROM [${utilitySchema}].[qa_header]
+          WHERE qa_id = @qaId;
+
+          SELECT COUNT(*) AS total
+          FROM inventory_adjustment
+          WHERE machine_id = N'UTILITY'
+            AND BATCH_NO = @batchNo;
+        `);
+
+      const recordsets = verification.recordsets as Array<Array<Record<string, unknown>>>;
+      assert.equal(Number(recordsets[0][0].endQty), 166);
+      assert.equal(Number(recordsets[0][0].endQtyTemp), 166);
+      assert.equal(Number(recordsets[0][0].assemblyBox), 10);
+      assert.equal(Number(recordsets[0][0].assemblyQty), 999);
+      assert.equal(String(recordsets[1][0].status), 'SAVED');
+      assert.equal(Number(recordsets[2][0].total), 0);
+    } finally {
+      await pool.request().query(`
+        IF OBJECT_ID(N'dbo.${triggerName}', N'TR') IS NOT NULL
+        BEGIN
+          DROP TRIGGER dbo.${triggerName};
+        END
+      `);
+      await setTestItemQuantity(100);
+    }
   });
 
   test('reset:qa removes a specific posted quantity adjustment and restores inventory state', async () => {

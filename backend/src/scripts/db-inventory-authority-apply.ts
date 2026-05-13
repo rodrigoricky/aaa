@@ -92,10 +92,44 @@ function timestamp(): string {
 
 /** Split a SQL file on GO batch separators and return non-empty batches. */
 function splitSqlBatches(content: string): string[] {
-  return content
-    .split(/^\s*GO\s*$/gim)
-    .map((b) => b.trim())
-    .filter((b) => b.length > 0);
+  const batches: string[] = [];
+  const currentLines: string[] = [];
+  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+
+  for (const line of normalized.split('\n')) {
+    if (/^\s*GO(?:\s+\d+)?\s*$/i.test(line)) {
+      const batch = currentLines.join('\n').trim();
+      if (batch.length > 0) {
+        batches.push(batch);
+      }
+      currentLines.length = 0;
+      continue;
+    }
+
+    currentLines.push(line);
+  }
+
+  const trailingBatch = currentLines.join('\n').trim();
+  if (trailingBatch.length > 0) {
+    batches.push(trailingBatch);
+  }
+
+  return batches;
+}
+
+/**
+ * SQL Server requires CREATE/ALTER PROCEDURE to be the first statement in its batch.
+ * Strip any leading preamble so only the procedure definition is executed.
+ */
+function isolateProcedureBatch(definition: string, procedureName: string): string {
+  const normalized = definition.replace(/^\uFEFF/, '').trimStart();
+  const match = normalized.match(/(?:^|\n)\s*(CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+PROC(?:EDURE)?\b/i);
+
+  if (!match || match.index === undefined) {
+    throw new Error(`Could not locate CREATE/ALTER PROCEDURE statement for ${procedureName}`);
+  }
+
+  return normalized.slice(match.index).trim();
 }
 
 /** Execute all batches in a SQL file, skipping empty ones. */
@@ -248,15 +282,16 @@ async function patchProcedure(
   }
 
   const patched = injectPatch(definition, procedureName);
+  const procedureBatch = isolateProcedureBatch(patched, procedureName);
 
   if (dryRun) {
     console.log(
-      `    [DRY RUN] Would ALTER PROCEDURE ${procedureName} (${patched.length} chars)`
+      `    [DRY RUN] Would ALTER PROCEDURE ${procedureName} (${procedureBatch.length} chars)`
     );
     return { skipped: false, reason: 'dry run — not applied' };
   }
 
-  await pool.request().query(patched);
+  await pool.request().query(procedureBatch);
   return { skipped: false, reason: 'patched successfully' };
 }
 

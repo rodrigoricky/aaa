@@ -48,18 +48,6 @@ BEGIN
 END
 GO
 
--- ============================================================
--- STEP 2 — STANDALONE OVERRIDE PROCEDURE (runnable, safe)
--- ============================================================
--- This procedure is the authoritative-override safety net.
--- It corrects items table stock values after any legacy procedure
--- has run and may have overwritten UTILITY-authoritative stock.
---
--- Intended use in EOD / inventory workflows:
---   EXEC dbo.sp_update_stock_inventory;
---   EXEC dbo.sp_apply_utility_inventory_override;
--- ============================================================
-
 CREATE OR ALTER PROCEDURE [dbo].[sp_apply_utility_inventory_override]
 AS
 BEGIN
@@ -101,6 +89,18 @@ BEGIN
     OR ABS(ISNULL(CONVERT(DECIMAL(18, 2), i.assembly_box),  0) - qa.authoritative_end_qty) > 0.001;
 END
 GO
+
+  -- ============================================================
+  -- STEP 2 — STANDALONE OVERRIDE PROCEDURE (runnable, safe)
+  -- ============================================================
+  -- This procedure is the authoritative-override safety net.
+  -- It corrects items table stock values after any legacy procedure
+  -- has run and may have overwritten UTILITY-authoritative stock.
+  --
+  -- Intended use in EOD / inventory workflows:
+  --   EXEC dbo.sp_update_stock_inventory;
+  --   EXEC dbo.sp_apply_utility_inventory_override;
+  -- ============================================================
 
 -- ============================================================
 -- STEP 3 — INLINE PATCH TEMPLATE FOR sp_update_stock_inventory
